@@ -1,0 +1,13 @@
+{
+  "sweep": {
+    "D_s": {"start": 4, "end": 40, "scale": "log", "num": 5}
+  },
+  "constants": {
+    "model": "immune_signaling",
+    "n_stages": 1, "tau": 0.5,
+    "M": 40, "K": 1, "h": 20, "alpha_priming": 20, "m": 3, "mu": 2,
+    "gamma_s": 0.5, "b_R": 0.5, "rho_reversion": 0.05, "p_ext": 1e-4,
+    "L": 300, "t_end": 120, "dt": 0.05, "dx": 0.1, "history_every": 20
+  },
+  "adaptive": false
+}

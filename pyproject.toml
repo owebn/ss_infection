@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ss-infection"
+version = "0.1.0"
+description = "1D reaction-diffusion (FEniCSx) simulations and theory of phage infection fronts in bacterial lawns, with abortive infection, immune signalling and lysogeny."
+readme = "README.md"
+requires-python = ">=3.10"
+# FEniCSx (dolfinx, basix, ufl, petsc4py) and mpi4py are needed to run
+# PDE simulations but are installed with conda, not pip; see
+# environment.yml. Theory mode (--theoretical) needs only these:
+dependencies = [
+    "numpy>=2.0",
+    "scipy",
+    "matplotlib",
+]
+
+[project.optional-dependencies]
+dev = ["flake8"]
+
+[project.scripts]
+ss-infection = "ss_infection.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,11 @@
+{
+  "sweep": {
+    "f_abi": {"start": 0.1, "end": 1.0, "scale": "log", "num": 10},
+    "L_primed": {"start": 10, "end": 100, "scale": "log", "num": 5}
+  },
+  "constants": {
+    "model": "abi_heterogeneous",
+    "b": 5
+  },
+  "adaptive": true
+}

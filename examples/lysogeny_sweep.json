@@ -1,0 +1,12 @@
+{
+  "sweep": {
+    "p_lys": {"start": 0.0, "end": 0.7, "num": 8}
+  },
+  "constants": {
+    "model": "lysogeny_delay_chain",
+    "n_stages": 4, "tau": 0.25,
+    "nu_induction": 0.02, "beta_L": 0.1,
+    "L": 100, "t_end": 30, "dt": 0.05
+  },
+  "adaptive": false
+}
