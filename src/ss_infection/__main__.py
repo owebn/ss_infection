@@ -173,6 +173,16 @@ def parse_arguments():
         "--p_ext", "--P_extinction", "--V_ext", type=float, default=1e-6,
         help="Phage extinction/breakthrough density threshold V_ext",
     )
+    parser.add_argument(
+        "--cutoff", action="store_true",
+        help="Density cutoff (manuscript Methods): phage below V_ext "
+             "(--p_ext) neither adsorb nor infect and are removed at "
+             "--cutoff_rate; suppresses non-physical tail tunnelling",
+    )
+    parser.add_argument(
+        "--cutoff_rate", type=float, default=5.0,
+        help="Removal rate of phage below V_ext when --cutoff is set",
+    )
 
     # Immune Signaling parameters
     parser.add_argument(

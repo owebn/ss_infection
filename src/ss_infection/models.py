@@ -213,6 +213,31 @@ class BaseModel(abc.ABC):
         """
         return [1]
 
+    @staticmethod
+    def _phage_cutoff(V, params, domain):
+        """Optional density cutoff (manuscript Methods; first review F1).
+
+        With ``params['cutoff']`` true, phage below V_ext (``p_ext``)
+        neither adsorb nor infect and are removed at ``cutoff_rate``
+        (default 5), representing phage discreteness independently of the
+        time step.
+
+        Returns (V_ads, removal): the phage density used in every
+        adsorption term, and the removal flux to subtract from dV/dt
+        (None when the cutoff is off, in which case V_ads is V itself
+        and the weak form is unchanged).
+        """
+        if not _param(params, ['cutoff'], False):
+            return V, None
+        V_ext = float(_param(
+            params, ['p_ext', 'P_extinction', 'p_extinction', 'V_ext'], 1e-6
+        ))
+        rate = float(_param(params, ['cutoff_rate'], 5.0))
+        V_ext_c = fem.Constant(domain, default_scalar_type(V_ext))
+        rate_c = fem.Constant(domain, default_scalar_type(rate))
+        above = ufl.conditional(ufl.ge(V, V_ext_c), 1.0, 0.0)
+        return above * V, rate_c * (1.0 - above) * V
+
     # -- outputs -------------------------------------------------------------
 
     @abc.abstractmethod
@@ -310,6 +335,7 @@ class DelayChainModel(BaseModel):
         v_V, v_S = v[0], v[1]
         v_I = v[2:]
         dx = ufl.dx
+        V_ads, removal = self._phage_cutoff(V, params, domain)
 
         eq_V = (
             ((V - V_n) / dt_c) * v_V * dx
@@ -317,21 +343,24 @@ class DelayChainModel(BaseModel):
                 ufl.grad(V), ufl.grad(v_V)
             ) * dx
             - (
-                -beta_c * V * S
-                - beta_c * V * sum(I_)
+                -beta_c * V_ads * S
+                - beta_c * V_ads * sum(I_)
                 + burst_c * w_c * I_[-1]
             ) * v_V * dx
         )
 
+        if removal is not None:
+            eq_V += removal * v_V * dx
+
         eq_S = (
             ((S - S_n) / dt_c) * v_S * dx
-            - (-beta_c * V * S) * v_S * dx
+            - (-beta_c * V_ads * S) * v_S * dx
         )
 
         eq_I_list = []
         eq_I1 = (
             ((I_[0] - I_n[0]) / dt_c) * v_I[0] * dx
-            - (beta_c * V * S - w_c * I_[0]) * v_I[0] * dx
+            - (beta_c * V_ads * S - w_c * I_[0]) * v_I[0] * dx
         )
         eq_I_list.append(eq_I1)
 
@@ -437,6 +466,7 @@ class AbortiveInfectionModel(BaseModel):
         v_J = v[j_start:j_end]
 
         dx = ufl.dx
+        V_ads, removal = self._phage_cutoff(V, params, domain)
 
         # --- Free phage (V) ---
         # Phage diffuses, is consumed by adsorption onto
@@ -450,23 +480,26 @@ class AbortiveInfectionModel(BaseModel):
                 ufl.grad(V), ufl.grad(v_V)
             ) * dx
             - (
-                -beta_c * V * S
-                - beta_c * V * R
-                - beta_c * V * sum(all_infected)
+                -beta_c * V_ads * S
+                - beta_c * V_ads * R
+                - beta_c * V_ads * sum(all_infected)
                 + burst_c * w_c * I_[-1]
             ) * v_V * dx
         )
 
+        if removal is not None:
+            eq_V += removal * v_V * dx
+
         # --- Susceptible cells (S) ---
         eq_S = (
             ((S - S_n) / dt_c) * v_S * dx
-            - (-beta_c * V * S) * v_S * dx
+            - (-beta_c * V_ads * S) * v_S * dx
         )
 
         # --- Abortive cells (R) ---
         eq_R = (
             ((R - R_n) / dt_c) * v_R * dx
-            - (-beta_c * V * R) * v_R * dx
+            - (-beta_c * V_ads * R) * v_R * dx
         )
 
         # --- Productive infected chain (I_1 .. I_n) ---
@@ -474,7 +507,7 @@ class AbortiveInfectionModel(BaseModel):
         eq_I1 = (
             ((I_[0] - I_n[0]) / dt_c) * v_I[0] * dx
             - (
-                beta_c * V * S - w_c * I_[0]
+                beta_c * V_ads * S - w_c * I_[0]
             ) * v_I[0] * dx
         )
         eq_I_list.append(eq_I1)
@@ -494,7 +527,7 @@ class AbortiveInfectionModel(BaseModel):
         eq_J1 = (
             ((J_[0] - J_n[0]) / dt_c) * v_J[0] * dx
             - (
-                beta_c * V * R - w_c * J_[0]
+                beta_c * V_ads * R - w_c * J_[0]
             ) * v_J[0] * dx
         )
         eq_J_list.append(eq_J1)
@@ -779,27 +812,34 @@ class LysogenyDelayChainModel(BaseModel):
         I_n = unc[2:2 + n]
         L, L_n = uc[2 + n], unc[2 + n]
         v_V, v_S, v_I, v_L = v[0], v[1], v[2:2 + n], v[2 + n]
+        V_ads, removal = self._phage_cutoff(V, params, domain)
 
         eq_V = (
             ((V - V_n) / dt_c) * v_V * dx
             + D_c * ufl.inner(ufl.grad(V), ufl.grad(v_V)) * dx
             - (
-                -beta_c * V * S
-                - beta_I_c * V * sum(I_)
-                - beta_L_c * V * L
+                -beta_c * V_ads * S
+                - beta_I_c * V_ads * sum(I_)
+                - beta_L_c * V_ads * L
                 + burst_c * w_c * I_[-1]
                 - delta_V_c * V
             ) * v_V * dx
         )
 
+        if removal is not None:
+            eq_V += removal * v_V * dx
+
         eq_S = (
             ((S - S_n) / dt_c) * v_S * dx
-            - (-beta_c * V * S) * v_S * dx
+            - (-beta_c * V_ads * S) * v_S * dx
         )
 
         eq_I = 0
         for k in range(n):
-            src = (beta_c * V * S + nu_c * L) if k == 0 else w_c * I_[k - 1]
+            if k == 0:
+                src = beta_c * V_ads * S + nu_c * L
+            else:
+                src = w_c * I_[k - 1]
             eq_I += (
                 ((I_[k] - I_n[k]) / dt_c) * v_I[k] * dx
                 - (src - (w_c + ell[k]) * I_[k]) * v_I[k] * dx
@@ -1029,6 +1069,7 @@ class ImmuneSignalingModel(BaseModel):
             return ((uc[i] - unc[i]) / dt) * v[i] * dx
 
         V, F, S = uc[0], uc[1], uc[2]
+        V_ads, removal = self._phage_cutoff(V, params, domain)
         R_ = [uc[self._R_start + i] for i in range(m)]
         # I_[k][j] = I^(j)_{k+1}: latent stage k+1, host stage j < m
         I_ = [
@@ -1054,7 +1095,7 @@ class ImmuneSignalingModel(BaseModel):
         def host_pop(j):
             return S if j == 0 else R_[j - 1]
 
-        beta_V = c['beta'] * V
+        beta_V = c['beta'] * V_ads
         lysis_I = w * sum(I_[-1])
         lysis_J = w * J_[-1]
         reversion = c['rho'] * (1.0 - H) * R_[-1]
@@ -1063,12 +1104,14 @@ class ImmuneSignalingModel(BaseModel):
         # Free phage V, eq. (15a)
         rhs_V = (
             -beta_V * (S + sum(R_))
-            - c['beta_I'] * V * (sum(all_I) + sum(J_))
+            - c['beta_I'] * V_ads * (sum(all_I) + sum(J_))
             + b * lysis_I + c['b_R'] * lysis_J
             - c['delta_V'] * V
         )
         if L is not None:
-            rhs_V -= c['beta_L'] * V * L
+            rhs_V -= c['beta_L'] * V_ads * L
+        if removal is not None:
+            rhs_V -= removal
         form = (
             ddt(0)
             + c['D'] * ufl.inner(ufl.grad(V), ufl.grad(v[0])) * dx
