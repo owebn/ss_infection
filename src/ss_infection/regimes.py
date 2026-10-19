@@ -24,6 +24,9 @@ Regimes, checked in this order:
     wave_halo      steady speed with a primed halo ahead of the tip
     unsteady       none of the above
 
+Steps after the tip reaches the far boundary (within max(2 dx, 1% L))
+are excluded, since a front that has crossed the domain cannot advance.
+
 A stall is a stretch of at least ``stall_min`` during which the smoothed
 tip speed stays below ``stall_frac * c_ref``. The reference speed
 ``c_ref`` is the dispersion-relation speed in a fully susceptible lawn.
@@ -176,19 +179,28 @@ def analyze(result, **overrides):
     settings = RegimeSettings.from_params(params, t_last)
 
     speed = sliding_speed(t, tip, settings.window) if len(t) else t
+
+    # Once the tip reaches the far boundary it cannot advance, which would
+    # look like a stall: analyse only the time before that.
+    L = float(params['L'])
+    margin = max(2.0 * float(params.get('dx', 0.1)), 0.01 * L)
+    at_edge = np.nan_to_num(tip, nan=-np.inf) >= L - margin
+    t_edge = float(t[np.argmax(at_edge)]) if np.any(at_edge) else np.inf
+    speed_free = np.where(t < t_edge, speed, np.nan)
+
     c_ref = reference_speed(result.model, params)
     if not np.isfinite(c_ref) or c_ref <= 0:
         after = speed[t >= settings.transient]
         c_ref = float(np.nanmax(after)) if np.any(~np.isnan(after)) \
             else float('nan')
     threshold = settings.stall_frac * c_ref if np.isfinite(c_ref) else 0.0
-    stalls = find_stalls(t, speed, threshold, settings.stall_min,
+    stalls = find_stalls(t, speed_free, threshold, settings.stall_min,
                          settings.transient)
     stall_mask = np.zeros(len(t))
     for t0, t1 in stalls:
         stall_mask[(t >= t0) & (t <= t1)] = 1.0
 
-    late = t >= settings.transient
+    late = (t >= settings.transient) & (t < t_edge)
     tip_late = tip[late]
     tip_ok = ~np.isnan(tip_late)
     eps = 0.5 * float(params.get('dt', 0.1))
@@ -199,7 +211,7 @@ def analyze(result, **overrides):
         c_mean = float((x_ok[-1] - x_ok[0]) / max(t_ok[-1] - t_ok[0], eps))
     else:
         c_mean = float('nan')
-    spd = speed[late]
+    spd = speed_free[late]
     spd = spd[~np.isnan(spd)]
     c_cv = (float(np.std(spd) / np.mean(spd))
             if len(spd) and np.mean(spd) > 0 else float('nan'))
