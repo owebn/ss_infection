@@ -1,0 +1,42 @@
+{
+  "description": "Manuscript set A regime map: D_s x b_R. The outrun threshold D_s,crit ~ 6 separates fast waves from fronts that meet their primed band; there, b_R < 1 stalls and b_R > 1 gives a slow wave (\u00a7 3.10, Table 7). Abortive extinction threshold: R0 = b_R < 1 at full priming. Uses the manuscript density cutoff (no infection below V_ext = p_ext, removal at rate 5); without it, stalls restart by non-physical tail tunnelling.",
+  "expected": {
+    "D_s < ~6, any b_R": "wave_fast",
+    "D_s > ~6, b_R < 1": "stall",
+    "D_s > ~6, b_R > 1": "wave_halo (or unsteady without a density cutoff)"
+  },
+  "sweep": {
+    "D_s": {
+      "start": 2.0,
+      "end": 14.0,
+      "step": 2.0
+    },
+    "b_R": {
+      "start": 0.25,
+      "end": 3.0,
+      "num": 6
+    }
+  },
+  "constants": {
+    "model": "immune_signaling",
+    "n_stages": 1,
+    "tau": 0.5,
+    "b": 5,
+    "M": 100,
+    "K": 1,
+    "h": 20,
+    "alpha_priming": 20,
+    "m": 5,
+    "mu": 1,
+    "gamma_s": 0.0,
+    "p_ext": 1e-06,
+    "L": 200,
+    "t_end": 100,
+    "dt": 0.02,
+    "dx": 0.1,
+    "history_every": 20,
+    "cutoff": true,
+    "cutoff_rate": 5.0
+  },
+  "adaptive": false
+}

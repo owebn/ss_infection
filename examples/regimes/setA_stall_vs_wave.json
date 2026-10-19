@@ -1,0 +1,37 @@
+{
+  "description": "Manuscript set A with a leaky-abortive burst below replacement (b_R = 0.5 < 1), sweeping signal diffusivity D_s across the outrun threshold (Table 7: D_s,crit ~ 5.95 with the maturation race; \u00a7 3.10). Uses the manuscript density cutoff (no infection below V_ext = p_ext, removal at rate 5); without it, stalls restart by non-physical tail tunnelling.",
+  "expected": {
+    "D_s below ~6": "wave_fast: the front outruns its own warning and travels at c0 ~ 2.12",
+    "D_s above ~6": "stall: the primed band reaches the leading edge, the front arrests and then creeps (\u00a7 3.9)"
+  },
+  "sweep": {
+    "D_s": {
+      "start": 2.0,
+      "end": 14.0,
+      "step": 2.0
+    }
+  },
+  "constants": {
+    "model": "immune_signaling",
+    "n_stages": 1,
+    "tau": 0.5,
+    "b": 5,
+    "M": 100,
+    "K": 1,
+    "h": 20,
+    "alpha_priming": 20,
+    "m": 5,
+    "mu": 1,
+    "gamma_s": 0.0,
+    "b_R": 0.5,
+    "p_ext": 1e-06,
+    "L": 200,
+    "t_end": 100,
+    "dt": 0.02,
+    "dx": 0.1,
+    "history_every": 20,
+    "cutoff": true,
+    "cutoff_rate": 5.0
+  },
+  "adaptive": false
+}

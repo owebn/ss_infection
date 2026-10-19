@@ -1,0 +1,37 @@
+{
+  "description": "Manuscript set A with a primed burst above replacement (b_R = 2 > 1), sweeping D_s across the outrun threshold (Table 7: D_s,crit ~ 6.45 with the maturation race; \u00a7 3.10). Uses the manuscript density cutoff (no infection below V_ext = p_ext, removal at rate 5); without it, stalls restart by non-physical tail tunnelling.",
+  "expected": {
+    "D_s below ~6.5": "wave_fast: steady front at c0 ~ 2.12 with no halo",
+    "D_s above ~6.5": "wave_halo (steady slow wave ~ kappa C(b_R) ~ 1.2 carrying a primed halo); without a density cutoff the PDE may instead show tunnelling leaps and halo oscillations, classified unsteady"
+  },
+  "sweep": {
+    "D_s": {
+      "start": 2.0,
+      "end": 14.0,
+      "step": 2.0
+    }
+  },
+  "constants": {
+    "model": "immune_signaling",
+    "n_stages": 1,
+    "tau": 0.5,
+    "b": 5,
+    "M": 100,
+    "K": 1,
+    "h": 20,
+    "alpha_priming": 20,
+    "m": 5,
+    "mu": 1,
+    "gamma_s": 0.0,
+    "b_R": 2.0,
+    "p_ext": 1e-06,
+    "L": 200,
+    "t_end": 100,
+    "dt": 0.02,
+    "dx": 0.1,
+    "history_every": 20,
+    "cutoff": true,
+    "cutoff_rate": 5.0
+  },
+  "adaptive": false
+}
