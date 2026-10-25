@@ -7,10 +7,11 @@ cells, a diffusible interferon-like death signal that primes neighbouring
 hosts, phage that read that signal to change latency, burst or lysogeny, and
 temperate phage with a prophage bank.
 
-Notation follows the draft manuscript *Self-generated immunity halos and phage
-counter-strategies in a spreading plaque* (Wingreen group): V free phage, S
-susceptible cells, R₁…Rₘ the refractory (maturation) chain with Rₘ primed,
-F the signal, β adsorption.
+Notation follows the *First Review* (Wingreen group), revision of Oct 24 2026:
+V free phage, U uninfected cells (S naive, R resistant), F the signal, β
+adsorption. The host response is an RNA–protein field: in each spatial bin the
+signal drives RNA m, RNA drives protein p, and the protein sets the resistant
+share φ(p) of every cell that can still switch (§ 3.1).
 
 ## Installation
 
@@ -56,11 +57,14 @@ regime thresholds:
 python -m ss_infection --from_history runs/delay_chain/history.npz --output_dir runs/delay_chain --stall_frac 0.2
 ```
 
-The manuscript's stop-and-go parameter set B:
+The review's stop-and-go parameter set B′ (§ 8.1):
 
 ```bash
-python -m ss_infection --model immune_signaling --n_stages 1 --tau 0.5 --M 40 --K 1 --alpha_priming 20 --n_priming 3 --mu 2 --D_s 40 --gamma_s 0.5 --b_R 0.5 --rho_reversion 0.05 --p_ext 1e-4 --L 300 --t_end 200 --dt 0.05 --history_every 20 --output_dir runs/setB
+python -m ss_infection --model immune_signaling --n_stages 1 --tau 0.5 --M 40 --K 1 --alpha_m 4 --delta_m 2 --alpha_p 4 --delta_p 0.4 --D_s 40 --delta_F 0.5 --b_R 0.5 --n_R 1 --cutoff --p_ext 1e-4 --L 300 --t_end 200 --dt 0.02 --history_every 50 --output_dir runs/setB
 ```
+
+Priming-curve and ceiling numbers for a parameter set (t₁/₂, t⋆, t_rev, φ∞,
+b∞_eff) are printed by `--theoretical`.
 
 `python -m ss_infection --help` lists every option. After installation the
 same command is also available as `ss-infection`.
@@ -73,9 +77,9 @@ same command is also available as `ss-infection`.
 | `abi` | Lawn with a fraction `f_abi` of abortive cells R (burst 0) | §2.1 |
 | `abi_heterogeneous` | Naive region of length `L_naive` followed by an abortive patch of length `L_primed` | §2.4 |
 | `lysogeny_delay_chain` | Temperate phage: constant lysogeny probability `p_lys` over a decision window; lysogens L induce at rate ν | §6.1 (no signal) |
-| `immune_signaling` | Death signal F (yield M, diffusion D_s, decay γ_s) primes S → R₁…Rₘ above threshold K; maturation races lysis, so infected cells keep maturing (I⁽ʲ⁾ₖ) | §§3.1, 3.5 |
+| `immune_signaling` | Death signal F (yield M, diffusion D_s, decay δ_F) drives a non-diffusing RNA–protein response, ṁ = α_m H(F) − δ_m m, ṗ = α_p m − δ_p p; cells switch fast and reversibly to resistance with share φ(p) = φ_max p/(K_p + p). Uninfected cells and latent stages k ≤ n_R switch; later stages freeze. Reversion is intrinsic (protein decay) | §§3.1–3.7 |
 | `immune_signaling_evasion` | As above; phage switch latency (`--tau_slow`) and burst (`--b_slow` or `--burst_mode frontier`) when F exceeds the trigger F_p | §4.5 |
-| `immune_signaling_lysogeny_evasion` | As above; phage switch lysogeny probability from `p_lys` to `p_lys_hi` when F exceeds F_p | §6 |
+| `immune_signaling_lysogeny_evasion` | As above; phage switch lysogeny probability from ℓ (`p_lys`) to ℓ_hi (`p_lys_hi`) when F exceeds F_p. Lysogens don't switch; an induced lysogen takes the local φ(p) | §6 |
 
 Strategy parameters default to the non-sensing values (`tau_slow = tau`,
 `b_slow = b`, `p_lys_hi = p_lys`, `F_p = K`), so an unset run is the
@@ -93,13 +97,17 @@ manuscript-notation aliases accepted on the command line, in sweep JSON and in
 | S₀ | `B0_val` | `S0` |
 | b, b_R | `b_val`, `b_abi` | `b`, `b_R` |
 | D, D_s | `D_val`, `D_signal` | `D`, `D_s` |
-| γ_s, K, M | `gamma_signal`, `T_signal`, `signal_yield` | `gamma_s`, `K`, `M` |
-| α, μ, h, m | `k_priming`, `mu_priming`, `hill_signal`, `n_priming` | `alpha_priming`, `mu`, `h`*, `m`* |
+| δ_F, K, M, h | `gamma_signal`, `T_signal`, `signal_yield`, `hill_signal` | `delta_F`, `K`, `M`, `h`* |
+| α_m, δ_m, α_p, δ_p | `alpha_m`, `delta_m`, `alpha_p`, `delta_p` | – |
+| φ_max, K_p, n_R | `phi_max`, `K_p`, `n_R` (default n) | – |
+| host time scale | `response_timescale` (divides α_m, δ_m, α_p, δ_p) | `tau_R` |
+| ℓ, ℓ_hi, γ | `p_lys`, `p_lys_hi`, `nu_induction` | `ell`, `ell_hi`, `gamma` |
 | F_p, h_p | `sigma_p`, `hill_p` | `F_p`, `h_p` |
 | δ_V, V_ext | `delta_P`, `p_ext` | `delta_V`, `V_ext` |
 
-\* sweep JSON and Python only (no one-letter command-line flags). `alpha` is
-reserved as an older alias of `f_abi`.
+\* sweep JSON and Python only (no one-letter command-line flag). `alpha` is
+reserved as an older alias of `f_abi`. Host-response defaults are set A′
+(α_m = 1, δ_m = 1, α_p = 2, δ_p = 0.1, φ_max = K_p = 1).
 
 ## Outputs
 
@@ -134,6 +142,30 @@ CSV columns depend on the model:
 * signal models: `L_halo_max/final`, `primed_band_width_max/final`,
   `sigma_tip_final` (edge signal F_f), `z_K_final`, `warning_median`
 
+### Regime sweeps (`examples/regimes/`)
+
+Sweeps built on the review's regime map for a non-adaptive front with the
+RNA–protein host response (parameter sets A′ and B′, §§ 3.6–3.13, § 8.1).
+Each file carries a `description` and the `expected` regimes, which the sweep
+loader ignores.
+
+| File | Sweep | Expected regimes |
+|---|---|---|
+| `setA_stall_vs_wave.json` | D_s 2–14, b_R = 0.5 (7 runs) | `wave_fast` below D_s ≈ 4.2, `stall` (arrest then creep) above |
+| `setA_slow_wave_vs_wave.json` | D_s 2–14, b_R = 2 (7 runs) | `wave_fast` below D_s ≈ 4.9, `wave_halo` (ceiling slow wave, c ≈ 1.26) above |
+| `setA_regime_map.json` | D_s 2–14 × b_R 0.25–3 (42 runs) | fast / stall (b_R < 0.80, where b∞_eff < 1) / ceiling slow wave |
+| `setB_protein_turnover.json` | protein decay δ_p 0.004–4, log (7 runs) | `stall` for slow turnover, `stop_and_go` for δ_p ≈ 0.04–0.4, steady ceiling slow wave for δ_p ≳ 1.3 (φ∞ < f_c) |
+| `latency_maturation_map.json` | latency τ 0.1–4 × host time scale 0.1–30, n = 4 (64 runs) | theory-based: `wave_fast` for slow response, `stop_and_go` in between; long latency tests conversion-driven stall vs a silent front |
+| `latency_maturation_map_n1.json` | as above with n = 1 (64 runs) | as above, exponential latency |
+
+```bash
+python -m ss_infection --sweep examples/regimes/setB_protein_turnover.json -o runs/setB_turnover.csv -j 7
+```
+
+These sweeps enable the density cutoff (`"cutoff": true`, see below) and use
+`dt = 0.02`, as the manuscript's thresholds were computed with a cutoff and
+small time steps. Each run takes roughly 10–20 minutes on one core.
+
 ### Front regimes
 
 `regime` is one of `extinct`, `silent`, `stop_and_go`, `stall`,
@@ -143,6 +175,16 @@ infection edge: a stall is a stretch where the tip speed stays below
 `stall_frac × c_ref` (default 0.25) for at least `stall_min`. All thresholds
 can be set with `--regime_transient`, `--regime_window`, `--stall_frac`,
 `--stall_min`, `--cv_steady` and `--halo_tol`. See `regimes.py`.
+
+### Density cutoff
+
+`--cutoff` (or `"cutoff": true` in a sweep) represents phage discreteness as
+in the manuscript's Methods: below V_ext (`--p_ext`) phage neither adsorb nor
+infect, and are removed at `--cutoff_rate` (default 5). Without it, a deterministic
+front can never truly stop: sub-particle phage tails tunnel through primed
+patches and re-ignite fronts beyond them. The cutoff also slows fronts by the
+Brunet–Derrida shift (n = 1, w = 2, V_ext = 10⁻⁴: c ≈ 1.98 against c* = 2.12).
+It is off by default, which leaves results unchanged.
 
 ## Adding a model
 
@@ -171,7 +213,7 @@ src/ss_infection/
   sweep.py             parameter sweeps
   dispersion.py        dispersion-relation wave speeds
   extinction.py        analytical extinction estimates
-examples/              sweep configurations
+examples/              sweep configurations (regimes/: manuscript regime maps)
 ```
 
 ## Development
@@ -182,10 +224,12 @@ flake8
 
 ## Known limitations
 
-* No density cutoff: free phage never vanish behind a stalled front (with
-  δ_V = 0), so failed invasions are classified `stall` rather than `extinct`.
-  Stop-and-go patterns should be checked against a tenfold change in the
-  cutoff (manuscript §3.11) before being called physical.
+* Without `--cutoff`, free phage never vanish behind a stalled front (with
+  δ_V = 0) and stalled fronts can restart by tail tunnelling. With it,
+  stop-and-go patterns should still be checked against a tenfold change in
+  V_ext (manuscript §3.11) before being called physical.
+* Time stepping is first-order implicit Euler: `dt = 0.05` overestimates front
+  speeds by about 7% (n = 1, w = 2); use `dt ≤ 0.02` for quantitative work.
 * Runs stop early when the 50% front reaches 80% of the domain.
 * The initial phage bolus is fixed at 5·exp(−x²/2).
 * `--theoretical` and theoretical sweeps for `delay_chain` apply the default

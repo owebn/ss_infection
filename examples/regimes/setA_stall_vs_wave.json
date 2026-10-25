@@ -1,8 +1,8 @@
 {
-  "description": "Manuscript set A with a leaky-abortive burst below replacement (b_R = 0.5 < 1), sweeping signal diffusivity D_s across the outrun threshold (Table 7: D_s,crit ~ 5.95 with the maturation race; \u00a7 3.10). Uses the manuscript density cutoff (no infection below V_ext = p_ext, removal at rate 5); without it, stalls restart by non-physical tail tunnelling.",
+  "description": "Set A' (\u00a7 8.1) with b_R = 0.5, n_R = n = 1: signal diffusivity D_s across the outrun threshold (PDE D_s,crit = 4.16 for n_R = n, 4.41 for n_R = 0; \u00a7 3.7). The ceiling b_eff_inf = 0.714 < 1 makes a stall possible (\u00a7 3.6). RNA-protein host response of the first review's revision of Oct 24 2026 (eq. 22); uses the density cutoff (no infection below V_ext = p_ext, removal at rate 5).",
   "expected": {
-    "D_s below ~6": "wave_fast: the front outruns its own warning and travels at c0 ~ 2.12",
-    "D_s above ~6": "stall: the primed band reaches the leading edge, the front arrests and then creeps (\u00a7 3.9)"
+    "D_s below ~4": "wave_fast at c0 ~ 2.12",
+    "D_s above ~4.2": "stall: arrest then creep (toll 1 - b_eff_inf = 0.286 per resistant cell; \u00a7 3.11)"
   },
   "sweep": {
     "D_s": {
@@ -19,19 +19,23 @@
     "M": 100,
     "K": 1,
     "h": 20,
-    "alpha_priming": 20,
-    "m": 5,
-    "mu": 1,
-    "gamma_s": 0.0,
-    "b_R": 0.5,
+    "alpha_m": 1,
+    "delta_m": 1,
+    "alpha_p": 2,
+    "delta_p": 0.1,
+    "phi_max": 1,
+    "K_p": 1,
+    "delta_F": 0.0,
+    "n_R": 1,
     "p_ext": 1e-06,
-    "L": 200,
-    "t_end": 100,
+    "cutoff": true,
+    "cutoff_rate": 5.0,
+    "L": 300,
+    "t_end": 150,
     "dt": 0.02,
     "dx": 0.1,
-    "history_every": 20,
-    "cutoff": true,
-    "cutoff_rate": 5.0
+    "history_every": 50,
+    "b_R": 0.5
   },
   "adaptive": false
 }

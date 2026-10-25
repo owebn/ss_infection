@@ -222,7 +222,7 @@ def run_simulation(
     front_positions = []
     times = []
     snap_times = []
-    profiles = {name: [] for name in groups}
+    profiles = {}
     p_end_history = []
     p_total_history = []
     time_history = []
@@ -253,9 +253,10 @@ def run_simulation(
 
     def record_snapshot(t):
         snapshot = {name: field(idx) for name, idx in groups.items()}
+        snapshot.update(model.derived_profiles(snapshot))
         snap_times.append(t)
         for name, values in snapshot.items():
-            profiles[name].append(values)
+            profiles.setdefault(name, []).append(values)
         for tracker in trackers:
             tracker.record_snapshot(field)
         if writer is not None:

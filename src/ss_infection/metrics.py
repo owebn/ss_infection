@@ -15,9 +15,9 @@ Tracker interface (any class a model lists in ``trackers``):
 Per time step (arrays aligned with the history's ``t``; NaN = undefined):
     tip_x               leading infection edge, farthest x with U < 0.99 S0
                         (every model)
-    primed_edge_x       leading primed edge, farthest x with
-                        R_m >= S0 / 2
-    primed_band_width   total length where R_m >= S0 / 2
+    primed_edge_x       leading primed edge, farthest x where the resistant
+                        uninfected density R = phi(p) U >= S0 / 2
+    primed_band_width   total length where R >= S0 / 2
     L_halo              primed_edge_x - tip_x, clipped at 0 (0 when no
                         primed band; primed cells only behind the tip
                         give no halo)
@@ -105,8 +105,9 @@ class SignalFrontTracker(FrontTracker):
     """Tracks tip, primed band and signal metrics every time step.
 
     Needs the model to provide get_front_subspaces(),
-    get_fully_primed_subspace(), get_signal_subspace() and
-    signal_threshold(params).
+    get_protein_subspace(), resistant_share(p), get_signal_subspace() and
+    signal_threshold(params). The primed (resistant) uninfected density
+    is R = phi(p) U, with phi the model's Michaelis-Menten response.
     """
 
     SUMMARY_COLUMNS = SUMMARY_COLUMNS
@@ -119,26 +120,30 @@ class SignalFrontTracker(FrontTracker):
     def __init__(self, model, params, x_coords, S0):
         super().__init__(model, params, x_coords, S0)
         self.K = float(model.signal_threshold(params))
-        self.primed_sub = (model.get_fully_primed_subspace(),)
+        self.protein_sub = (model.get_protein_subspace(),)
+        self.resistant_share = model.resistant_share
         self.signal_sub = (model.get_signal_subspace(),)
         self.primed_edge_snap = []
         self.t_signal_x = np.full(len(self.x), np.nan)
         self.t_tip_x = np.full(len(self.x), np.nan)
 
-    def primed_edge(self, R_m):
-        return leading_edge(self.x, R_m, PRIMED_LEVEL * self.S0)
+    def primed_edge(self, R):
+        return leading_edge(self.x, R, PRIMED_LEVEL * self.S0)
+
+    def resistant_density(self, field):
+        """R = phi(p) U: resistant uninfected cells."""
+        U = field(self.front_subs)
+        return U, self.resistant_share(field(self.protein_sub)) * U
 
     def update(self, t, field):
-        self._update(
-            t, field(self.front_subs), field(self.primed_sub),
-            field(self.signal_sub),
-        )
+        U, R = self.resistant_density(field)
+        self._update(t, U, R, field(self.signal_sub))
 
-    def _update(self, t, U, R_m, F):
+    def _update(self, t, U, R, F):
         x = self.x
         tip = self.tip(U)
-        primed_mask = R_m >= PRIMED_LEVEL * self.S0
-        edge = self.primed_edge(R_m)
+        primed_mask = R >= PRIMED_LEVEL * self.S0
+        edge = self.primed_edge(R)
         x_K = leading_edge(x, F, self.K)
 
         if np.isnan(tip):
@@ -173,7 +178,7 @@ class SignalFrontTracker(FrontTracker):
     def record_snapshot(self, field):
         """Primed edge at a kymograph snapshot (aligned with t_snap)."""
         self.primed_edge_snap.append(
-            self.primed_edge(field(self.primed_sub))
+            self.primed_edge(self.resistant_density(field)[1])
         )
 
     def warning_time(self):

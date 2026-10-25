@@ -1,9 +1,9 @@
 {
-  "description": "Manuscript set A regime map: D_s x b_R. The outrun threshold D_s,crit ~ 6 separates fast waves from fronts that meet their primed band; there, b_R < 1 stalls and b_R > 1 gives a slow wave (\u00a7 3.10, Table 7). Abortive extinction threshold: R0 = b_R < 1 at full priming. Uses the manuscript density cutoff (no infection below V_ext = p_ext, removal at rate 5); without it, stalls restart by non-physical tail tunnelling.",
+  "description": "Set A' regime map, D_s x b_R (n_R = n = 1). Fronts outrun their signal below D_s,crit ~ 4.2-4.9 (\u00a7 3.7); beyond it the resistance ceiling decides: b_eff_inf = 5 - (5 - b_R) phi_inf with phi_inf = 0.952, so a stall needs b_R < 0.80, and larger b_R gives a ceiling slow wave (\u00a7 3.6). RNA-protein host response of the first review's revision of Oct 24 2026 (eq. 22); uses the density cutoff (no infection below V_ext = p_ext, removal at rate 5).",
   "expected": {
-    "D_s < ~6, any b_R": "wave_fast",
-    "D_s > ~6, b_R < 1": "stall",
-    "D_s > ~6, b_R > 1": "wave_halo (or unsteady without a density cutoff)"
+    "D_s < ~4.2": "wave_fast",
+    "D_s > ~4.2, b_R < 0.80": "stall",
+    "D_s > ~4.9, b_R > 0.80": "wave_halo (ceiling slow wave)"
   },
   "sweep": {
     "D_s": {
@@ -25,18 +25,22 @@
     "M": 100,
     "K": 1,
     "h": 20,
-    "alpha_priming": 20,
-    "m": 5,
-    "mu": 1,
-    "gamma_s": 0.0,
+    "alpha_m": 1,
+    "delta_m": 1,
+    "alpha_p": 2,
+    "delta_p": 0.1,
+    "phi_max": 1,
+    "K_p": 1,
+    "delta_F": 0.0,
+    "n_R": 1,
     "p_ext": 1e-06,
-    "L": 200,
-    "t_end": 100,
+    "cutoff": true,
+    "cutoff_rate": 5.0,
+    "L": 300,
+    "t_end": 150,
     "dt": 0.02,
     "dx": 0.1,
-    "history_every": 20,
-    "cutoff": true,
-    "cutoff_rate": 5.0
+    "history_every": 50
   },
   "adaptive": false
 }

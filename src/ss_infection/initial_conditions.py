@@ -116,11 +116,12 @@ class AbiHeterogeneousInitialCondition(BaseInitialCondition):
 class ImmuneSignalingInitialCondition(BaseInitialCondition):
     """IC for the immune signaling model.
 
-    Initialises S = S0 across the domain, V as a Gaussian bolus,
-    and all signal, priming, and infected components to 0.
+    Initialises the uninfected lawn U = S0 across the domain, V as a
+    Gaussian bolus, and the signal, RNA, protein and infected components
+    to 0 (no prior priming).
 
     Component layout expected:
-        0: V, 1: F, 2: S, 3+: refractory chain, infected grid, abortive chain
+        0: V, 1: F, 2: U, 3: m (RNA), 4: p (protein), 5+: infected stages
     """
 
     def apply(self, W, u, params):

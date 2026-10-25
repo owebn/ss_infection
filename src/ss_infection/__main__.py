@@ -184,55 +184,69 @@ def parse_arguments():
         help="Removal rate of phage below V_ext when --cutoff is set",
     )
 
-    # Immune Signaling parameters
+    # Signalling models: death signal (first review, revision of
+    # Oct 24 2026, § 3.1). Defaults for the host response are set A'.
     parser.add_argument(
         "--D_signal", "--D_sig", "--D_s", type=float, default=1.0,
         help="Signal diffusion coefficient D_s",
     )
     parser.add_argument(
-        "--gamma_signal", "--gamma_sig", "--gamma_s", type=float, default=0.1,
-        help="Signal decay rate gamma_s",
+        "--gamma_signal", "--gamma_sig", "--gamma_s", "--delta_F",
+        type=float, default=0.1,
+        help="Signal decay rate delta_F",
     )
     parser.add_argument(
         "--T_signal", "--T_sig", "--K", type=float, default=0.1,
-        help="Signal threshold K for host maturation",
-    )
-    parser.add_argument(
-        "--k_priming", "--rate_priming", "--alpha_priming",
-        type=float, default=1.0,
-        help="Maturation entry rate alpha (at F above K)",
-    )
-    parser.add_argument(
-        "--n_priming", type=int, default=3,
-        help="Number m of refractory stages R_1 .. R_m",
-    )
-    parser.add_argument(
-        "--tau_priming", type=float, default=5.0,
-        help="Mean duration of priming transition",
+        help="Signal threshold K of the RNA response H(F)",
     )
     parser.add_argument(
         "--signal_yield", "--yield_signal", "--M", type=float, default=1.0,
         help="Signal M released per lysing cell",
     )
-
-    # Death-signal models (immune_signaling_evasion,
-    # immune_signaling_lysogeny_evasion; review § 3.1)
     parser.add_argument(
         "--hill_signal", type=float, default=20.0,
-        help="Hill steepness h of host priming H(F)",
+        help="Hill steepness h of H(F)",
+    )
+
+    # RNA-protein host response (eq. 22): dm/dt = alpha_m H(F) - delta_m m,
+    # dp/dt = alpha_p m - delta_p p, resistant share phi(p)
+    parser.add_argument(
+        "--alpha_m", type=float, default=1.0,
+        help="Maximal RNA production rate alpha_m",
     )
     parser.add_argument(
-        "--mu_priming", "--mu", type=float, default=None,
-        help="Per-stage refractory maturation rate mu "
-             "(defaults to n_priming / tau_priming)",
+        "--delta_m", type=float, default=1.0,
+        help="RNA decay rate delta_m",
+    )
+    parser.add_argument(
+        "--alpha_p", type=float, default=2.0,
+        help="Protein production per RNA alpha_p",
+    )
+    parser.add_argument(
+        "--delta_p", type=float, default=0.1,
+        help="Protein decay rate delta_p (0 = permanent priming)",
+    )
+    parser.add_argument(
+        "--phi_max", type=float, default=1.0,
+        help="Maximum resistant proportion phi_max",
+    )
+    parser.add_argument(
+        "--K_p", type=float, default=1.0,
+        help="Half-saturation protein level K_p of phi(p)",
+    )
+    parser.add_argument(
+        "--response_timescale", "--tau_R", type=float, default=1.0,
+        help="Divides alpha_m, delta_m, alpha_p and delta_p: stretches the "
+             "priming curve without changing p_inf or phi_inf",
+    )
+    parser.add_argument(
+        "--n_R", type=int, default=None,
+        help="Last latent stage whose cells can still switch "
+             "(0 = status fixed at infection; default n_stages)",
     )
     parser.add_argument(
         "--b_abi", "--b_S", "--b_R", type=float, default=0.0,
-        help="Burst b_R of primed (abortive) cells",
-    )
-    parser.add_argument(
-        "--rho_reversion", type=float, default=0.0,
-        help="Reversion rate rho of R_m below threshold",
+        help="Burst b_R of resistant (abortive) cells",
     )
     parser.add_argument(
         "--delta_P", "--delta_V", type=float, default=0.0,
@@ -279,16 +293,18 @@ def parse_arguments():
 
     # Lysogeny (lysogeny_delay_chain, immune_signaling_lysogeny_evasion)
     parser.add_argument(
-        "--p_lys", type=float, default=0.0,
-        help="Lysogeny probability (at low signal for the evasion model)",
+        "--p_lys", "--ell", type=float, default=0.0,
+        help="Lysogeny probability ell (at low signal for the evasion "
+             "model)",
     )
     parser.add_argument(
-        "--p_lys_hi", type=float, default=None,
-        help="Lysogeny probability at high signal (defaults to p_lys)",
+        "--p_lys_hi", "--ell_hi", type=float, default=None,
+        help="Lysogeny probability ell_hi at high signal (defaults to "
+             "p_lys)",
     )
     parser.add_argument(
-        "--nu_induction", "--nu", type=float, default=0.02,
-        help="Prophage induction rate nu",
+        "--nu_induction", "--nu", "--gamma", type=float, default=0.02,
+        help="Prophage induction rate gamma",
     )
     parser.add_argument(
         "--f_L_val", "--beta_L", type=float, default=None,

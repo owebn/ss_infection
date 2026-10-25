@@ -238,7 +238,8 @@ def plot_snapshot(result, index=-1, save_path=None, show=True):
     The phage group moves to a secondary axis when its scale differs from
     the first group's by more than 5x.
     """
-    groups = [g for g in result.model.profile_groups() if g.label]
+    groups = [g for g in result.model.profile_groups()
+              if g.label and g.name in result.profiles]
     x = result.x
     values = [result.profiles[g.name][index] for g in groups]
 

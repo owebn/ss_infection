@@ -3,8 +3,9 @@ import math
 
 import numpy as np
 
-from . import extinction
+from . import extinction, host_response
 from .dispersion import dispersion_args, solve_dispersion_erlang
+from .host_response import HostResponse
 from .initial_conditions import (
     AbiBolusInitialCondition,
     AbiHeterogeneousInitialCondition,
@@ -78,7 +79,7 @@ class BaseModel(abc.ABC):
         'n': 'n_stages', 'stages': 'n_stages',
         'latent_period': 'tau', 'delay': 'tau',
         'P_extinction': 'p_ext', 'p_extinction': 'p_ext',
-        # Manuscript notation (V phage, S susceptible, R refractory)
+        # Manuscript notation (V phage, S naive, R resistant)
         'beta': 'f_B_val', 'beta_I': 'f_I_val', 'beta_L': 'f_L_val',
         'S0': 'B0_val', 'b_R': 'b_abi', 'delta_V': 'delta_P',
         'V_ext': 'p_ext',
@@ -253,8 +254,17 @@ class BaseModel(abc.ABC):
         """
         groups = {'U': tuple(self.get_front_subspaces())}
         for group in self.profile_groups():
-            groups[group.name] = tuple(group.indices)
+            if group.indices:
+                groups[group.name] = tuple(group.indices)
         return groups
+
+    def derived_profiles(self, snapshot):
+        """Profiles computed from cached ones ({name: array}).
+
+        Declared in profile_groups() with empty ``indices``; called on each
+        snapshot after the component sums of history_groups() are taken.
+        """
+        return {}
 
     def kymograph_title(self, result):
         title = "Bacterial Density Spatiotemporal Dynamics"
@@ -390,7 +400,7 @@ class AbortiveInfectionModel(BaseModel):
     """Delay-chain model with abortive cells placed in the lawn (§ 2.1).
 
     A fraction f_abi of the lawn starts in the abortive (primed) state,
-    written R (R_m in the signalling models). Abortive cells adsorb phage
+    written R (the resistant state of the signalling models). They adsorb phage
     at the normal rate beta, and their infections (J_1 .. J_k_abi) die
     without releasing phage (b_R = 0 here).
 
@@ -877,45 +887,48 @@ class LysogenyDelayChainModel(BaseModel):
 
 
 class ImmuneSignalingModel(BaseModel):
-    """Delay-chain model with an interferon-like death signal (§§ 3.1, 3.5).
+    """Delay chain with a death signal and an RNA-protein host response.
 
-    Notation follows the manuscript (within-host viral dynamics): V free
-    phage, S susceptible cells, R_1 .. R_m the refractory (maturation)
-    chain with R_m primed/abortive, F the signal, beta adsorption.
+    First review, revision of Oct 24 2026, §§ 3.1-3.7 (eqs. 22-28). Every
+    lysis, productive or resistant, releases M signal units; the signal F
+    diffuses (D_s) and decays (delta_F F). Each spatial bin carries an
+    intracellular RNA m and protein p, shared by every cell in the bin and
+    not diffusing:
 
-    Every lysis, productive or abortive, releases M signal units. F
-    diffuses (D_s) and decays linearly (gamma_s F). Susceptible cells
-    sensing F enter the refractory chain at rate alpha H(F), with H a
-    smooth Hill switch (steepness h) around the threshold K, and advance
-    at rate mu per stage. R_m is abortive with burst b_R; earlier stages
-    are still fully productive.
+        dm/dt = alpha_m H(F) - delta_m m,   dp/dt = alpha_p m - delta_p p,
+        H(F) = F^h / (K^h + F^h),           phi(p) = phi_max p / (K_p + p).
 
-    Maturation races lysis (eqs. 21-22, full race, epsilon = 1): an
-    infected cell keeps maturing at the same rates as an uninfected one,
-    so infections form a grid I^(j)_k (latent stage k, host stage
-    j = 0 .. m, with R~_0 = S). A cell reaching host stage m before it
-    lyses (I^(m)_k, stored as J_k) aborts and releases b_R; one that lyses
-    first releases the full burst b. Optional priming reversion rho of
-    uninfected R_m and phage decay delta_V (§ 3.11).
+    phi(p) is the resistant proportion (resistant cells adsorb at beta but
+    burst b_R < b). Switching between productive and resistant is fast and
+    reversible, so every compartment still allowed to switch has resistant
+    share phi(p) and is tracked by its total: the uninfected U (S = (1-phi)
+    U, R = phi U) and the infected stages T_1 .. T_{n_R}. On leaving stage
+    n_R an infection freezes, splitting (1 - phi) : phi into productive I_k
+    and resistant J_k for k > n_R (eq. 27). n_R = 0 fixes the status at
+    infection; n_R = n lets the bin convert infected cells until lysis,
+    whose burst is then b_eff(phi) = b - (b - b_R) phi (eq. 28). Reversion
+    is intrinsic (protein decay); there is no separate reversion rate.
+    Optional phage decay delta_V and density cutoff as elsewhere.
 
     Subclasses add phage strategies through three hooks:
-    ``_latency_rate``, ``_burst`` and ``_lysogeny_hazards``.
+    ``_latency_rate``, ``_burst`` and ``_lysogeny_hazards``. Lysogens do
+    not switch; an induced lysogen re-enters stage 1 and takes the local
+    phi (it joins T_1 when n_R >= 1, or splits into I_1 / J_1 when
+    n_R = 0; § 6.1).
 
     Component layout in the mixed function space:
-        0: V (free phage)
-        1: F (signal)
-        2: S (susceptible cells)
-        3 .. 3 + m - 1: R_1 .. R_m (uninfected refractory chain;
-            R_m fully primed)
-        then I^(j)_k for k = 1 .. n, j = 0 .. m - 1 (k-major)
-        then J_1 .. J_n = I^(m)_1 .. I^(m)_n (infected, host fully primed)
-        then L (lysogens; only when ``has_lysogens``)
+        0: V (free phage)       1: F (signal)       2: U (uninfected)
+        3: m (RNA)              4: p (protein)
+        5 .. 5 + n_R - 1:       T_1 .. T_{n_R} (switching infected)
+        then I_{n_R+1} .. I_n   (frozen productive)
+        then J_{n_R+1} .. J_n   (frozen resistant)
+        then L                  (lysogens; only when ``has_lysogens``)
 
-    Parameter names: beta = f_B_val, beta_I = f_I_val, beta_L = f_L_val,
-    S0 = B0_val, b_R = b_abi, delta_V = delta_P, D_s = D_signal,
-    gamma_s = gamma_signal, K = T_signal, M = signal_yield,
-    alpha = k_priming, mu = mu_priming, h = hill_signal, m = n_priming.
-    The manuscript names are accepted as aliases (see param_aliases).
+    Parameter names (manuscript symbol = canonical key): D_s = D_signal,
+    delta_F = gamma_signal, K = T_signal, M = signal_yield, h = hill_signal,
+    alpha_m, delta_m, alpha_p, delta_p, phi_max, K_p, n_R (default n),
+    b_R = b_abi. ``response_timescale`` divides alpha_m, delta_m, alpha_p
+    and delta_p (stretches the priming curve, keeps p_inf and phi_inf).
     """
 
     name = 'immune_signaling'
@@ -930,74 +943,84 @@ class ImmuneSignalingModel(BaseModel):
     param_aliases = {
         **BaseModel.param_aliases,
         'D_sig': 'D_signal', 'gamma_sig': 'gamma_signal',
-        'T_sig': 'T_signal', 'rate_priming': 'k_priming',
+        'T_sig': 'T_signal',
         'yield_signal': 'signal_yield', 'b_sig': 'signal_yield',
-        # Manuscript notation (F signal, R_1 .. R_m refractory chain)
-        'D_s': 'D_signal', 'gamma_s': 'gamma_signal', 'K': 'T_signal',
-        'M': 'signal_yield', 'alpha_priming': 'k_priming',
-        'mu': 'mu_priming', 'h': 'hill_signal', 'm': 'n_priming',
+        # Manuscript notation (F signal, RNA m, protein p, phi(p))
+        'D_s': 'D_signal', 'gamma_s': 'gamma_signal',
+        'delta_F': 'gamma_signal', 'K': 'T_signal',
+        'M': 'signal_yield', 'h': 'hill_signal',
+        'tau_R': 'response_timescale',
         'F_p': 'sigma_p', 'h_p': 'hill_p',
     }
     sweep_defaults = {
         **BaseModel.sweep_defaults,
         'D_signal': 1.0, 'gamma_signal': 0.1, 'T_signal': 0.1,
-        'k_priming': 1.0, 'n_priming': 3, 'tau_priming': 5.0,
-        'signal_yield': 1.0,
+        'signal_yield': 1.0, 'hill_signal': 20.0,
+        # Host response defaults: manuscript set A' (§ 8.1)
+        'alpha_m': 1.0, 'delta_m': 1.0, 'alpha_p': 2.0, 'delta_p': 0.1,
+        'phi_max': 1.0, 'K_p': 1.0, 'response_timescale': 1.0,
     }
     implied_by = (
-        'D_signal', 'gamma_signal', 'T_signal', 'k_priming', 'signal_yield',
+        'D_signal', 'gamma_signal', 'T_signal', 'signal_yield',
+        'alpha_m', 'delta_m', 'alpha_p', 'delta_p', 'phi_max', 'K_p', 'n_R',
     )
 
     def __init__(
-        self, n_stages: int = 10, n_priming: int = 3, k_abi: int = None
+        self, n_stages: int = 10, n_R: int = None, phi_max: float = 1.0,
+        K_p: float = 1.0, k_abi: int = None,
     ):
-        if k_abi is not None and k_abi != n_stages:
-            raise ValueError(
-                "ImmuneSignalingModel requires k_abi == n_stages: infected "
-                "cells keep their latent stage when they finish priming."
-            )
         self.n_stages = n_stages
-        self.n_priming = max(1, n_priming)
+        self.n_R = n_stages if n_R is None else int(n_R)
+        if not 0 <= self.n_R <= n_stages:
+            raise ValueError(
+                f"n_R must lie in 0 .. n_stages ({n_stages}); got {self.n_R}."
+            )
+        self.phi_max = float(phi_max)
+        self.K_p = float(K_p)
         self.k_abi = n_stages
 
+    # -- layout --------------------------------------------------------------
+
+    _U, _M, _P = 2, 3, 4
+
     @property
-    def _R_start(self):
-        return 3
+    def _T_start(self):
+        return 5
 
     @property
     def _I_start(self):
-        return self._R_start + self.n_priming
-
-    def _I_index(self, k, j):
-        """Component of I^(j)_{k+1} (latent stage k+1, host stage j < m)."""
-        return self._I_start + k * self.n_priming + j
+        return self._T_start + self.n_R
 
     @property
     def _J_start(self):
-        return self._I_start + self.n_stages * self.n_priming
+        return self._I_start + (self.n_stages - self.n_R)
 
     @property
     def _L_index(self):
-        return self._J_start + self.n_stages
+        return self._J_start + (self.n_stages - self.n_R)
 
     @property
     def num_components(self) -> int:
         return self._L_index + (1 if self.has_lysogens else 0)
 
     def get_front_subspaces(self):
-        # Uninfected cells U = S + sum_j R_j
-        return [2] + list(range(self._R_start, self._I_start))
-
-    def get_fully_primed_subspace(self):
-        # Subspace index of fully primed (abortive) cells R_m
-        return self._I_start - 1
+        # Uninfected cells U = S + R
+        return [self._U]
 
     def get_signal_subspace(self):
         return 1
 
+    def get_protein_subspace(self):
+        return self._P
+
     def signal_threshold(self, params):
-        """Host priming threshold K (shared by weak form and metrics)."""
+        """Host response threshold K (shared by weak form and metrics)."""
         return float(_param(params, ['T_signal', 'T_sig', 'K'], 0.1))
+
+    def resistant_share(self, p):
+        """phi(p) = phi_max p / (K_p + p) on numpy arrays."""
+        p = np.maximum(np.asarray(p, dtype=float), 0.0)
+        return self.phi_max * p / (self.K_p + p)
 
     # -- strategy hooks ----------------------------------------------------
 
@@ -1006,11 +1029,11 @@ class ImmuneSignalingModel(BaseModel):
         return c['w']
 
     def _burst(self, F, c):
-        """Burst b of the productive lineage (may depend on F)."""
+        """Burst b of productive lysis (may depend on F)."""
         return c['b']
 
     def _lysogeny_hazards(self, F, c):
-        """Per-stage lysogeny hazards ell_k(F), or None without lysogeny."""
+        """Per-stage lysogeny hazards sigma_k(F), or None (no lysogeny)."""
         return None
 
     def _extra_constants(self, const, params, base):
@@ -1019,12 +1042,11 @@ class ImmuneSignalingModel(BaseModel):
 
     # -- weak form ---------------------------------------------------------
 
-    def create_weak_formulation(self, domain, W, u, u_n, params):
-        n = self.n_stages
-        m = self.n_priming
-
+    def _rates(self, params):
+        """Plain-float rate constants of the weak form, in creation order."""
         beta = _param(params, ['f_B_val', 'f_B', 'beta'], 1.0)
-        base = {
+        host = HostResponse.from_params(params)
+        return {
             'D': _param(params, ['D_val', 'D'], 1.0),
             'beta': beta,
             'beta_I': _param(params, ['f_I_val', 'f_I', 'beta_I'], beta),
@@ -1034,24 +1056,24 @@ class ImmuneSignalingModel(BaseModel):
             'b_R': _param(params, ['b_abi', 'b_S', 'b_R'], 0.0),
             'delta_V': _param(params, ['delta_P', 'delta_V'], 0.0),
             'D_s': _param(params, ['D_signal', 'D_sig', 'D_s'], 1.0),
-            'gamma_s': _param(
-                params, ['gamma_signal', 'gamma_sig', 'gamma_s'], 0.1
+            'delta_F': _param(
+                params, ['gamma_signal', 'gamma_sig', 'gamma_s', 'delta_F'],
+                0.1,
             ),
             'K': self.signal_threshold(params),
             'h': _param(params, ['hill_signal', 'h'], 20.0),
             'M': _param(
                 params, ['signal_yield', 'yield_signal', 'b_sig', 'M'], 1.0
             ),
-            'alpha': _param(
-                params, ['k_priming', 'rate_priming', 'alpha_priming'], 1.0
-            ),
-            'rho': _param(params, ['rho_reversion', 'rho'], 0.0),
+            'alpha_m': host.alpha_m, 'delta_m': host.delta_m,
+            'alpha_p': host.alpha_p, 'delta_p': host.delta_p,
+            'phi_max': self.phi_max, 'K_p': self.K_p,
             'dt': _param(params, ['dt'], 0.1),
         }
-        tau_prime = _param(params, ['tau_priming'], 5.0)
-        base['mu'] = _param(
-            params, ['mu_priming', 'mu'], float(m) / float(tau_prime)
-        )
+
+    def create_weak_formulation(self, domain, W, u, u_n, params):
+        n, n_R = self.n_stages, self.n_R
+        base = self._rates(params)
 
         def const(val):
             return fem.Constant(domain, default_scalar_type(val))
@@ -1068,44 +1090,43 @@ class ImmuneSignalingModel(BaseModel):
         def ddt(i):
             return ((uc[i] - unc[i]) / dt) * v[i] * dx
 
-        V, F, S = uc[0], uc[1], uc[2]
+        V, F, U = uc[0], uc[1], uc[self._U]
+        m_rna, p_prot = uc[self._M], uc[self._P]
         V_ads, removal = self._phage_cutoff(V, params, domain)
-        R_ = [uc[self._R_start + i] for i in range(m)]
-        # I_[k][j] = I^(j)_{k+1}: latent stage k+1, host stage j < m
-        I_ = [
-            [uc[self._I_index(k, j)] for j in range(m)] for k in range(n)
-        ]
-        # J_[k] = I^(m)_{k+1}: infections whose host has fully matured
-        J_ = [uc[self._J_start + k] for k in range(n)]
+        T_ = [uc[self._T_start + k] for k in range(n_R)]
+        I_ = [uc[self._I_start + i] for i in range(n - n_R)]
+        J_ = [uc[self._J_start + i] for i in range(n - n_R)]
         L = uc[self._L_index] if self.has_lysogens else None
 
         H = _hill(F, c['K'], c['h'])
         w = self._latency_rate(F, c)
         b = self._burst(F, c)
-        ell = self._lysogeny_hazards(F, c)
-        if ell is None:
-            ell = [0.0] * n
+        sigma = self._lysogeny_hazards(F, c)
+        if sigma is None:
+            sigma = [0.0] * n
+        p_pos = ufl.max_value(p_prot, 0.0)
+        phi = c['phi_max'] * p_pos / (c['K_p'] + p_pos)
 
-        # Host maturation rate out of host stage j (0 = susceptible S). The
-        # same rates apply to uninfected and infected cells (the race).
-        def host_rate(j):
-            return c['alpha'] * H if j == 0 else c['mu']
+        def stage_total(k):
+            """All infected cells in latent stage k + 1."""
+            return T_[k] if k < n_R else I_[k - n_R] + J_[k - n_R]
 
-        # Uninfected cells at host stage j < m (R~_0 = S, R~_j = R_j)
-        def host_pop(j):
-            return S if j == 0 else R_[j - 1]
+        # Lysis from the last stage: switching (n_R = n) or frozen
+        if n_R == n:
+            lysis_prod = w * (1.0 - phi) * T_[-1]
+            lysis_res = w * phi * T_[-1]
+        else:
+            lysis_prod = w * I_[-1]
+            lysis_res = w * J_[-1]
 
         beta_V = c['beta'] * V_ads
-        lysis_I = w * sum(I_[-1])
-        lysis_J = w * J_[-1]
-        reversion = c['rho'] * (1.0 - H) * R_[-1]
-        all_I = [I_kj for row in I_ for I_kj in row]
+        infected = sum(stage_total(k) for k in range(n))
 
-        # Free phage V, eq. (15a)
+        # Free phage V, eq. (23)
         rhs_V = (
-            -beta_V * (S + sum(R_))
-            - c['beta_I'] * V_ads * (sum(all_I) + sum(J_))
-            + b * lysis_I + c['b_R'] * lysis_J
+            -beta_V * U
+            - c['beta_I'] * V_ads * infected
+            + b * lysis_prod + c['b_R'] * lysis_res
             - c['delta_V'] * V
         )
         if L is not None:
@@ -1118,73 +1139,91 @@ class ImmuneSignalingModel(BaseModel):
             - rhs_V * v[0] * dx
         )
 
-        # Signal F, eq. (15b): every lysis, productive or abortive, gives M
+        # Signal F, eq. (24): every lysis, productive or resistant, gives M
         form += (
             ddt(1)
             + c['D_s'] * ufl.inner(ufl.grad(F), ufl.grad(v[1])) * dx
-            - (c['M'] * (lysis_I + lysis_J) - c['gamma_s'] * F)
+            - (c['M'] * (lysis_prod + lysis_res) - c['delta_F'] * F)
             * v[1] * dx
         )
 
-        # Susceptible cells S, eq. (15c)
-        form += ddt(2) - (
-            -beta_V * S - host_rate(0) * S + reversion
-        ) * v[2] * dx
+        # Uninfected cells U, eq. (25)
+        form += ddt(self._U) - (-beta_V * U) * v[self._U] * dx
 
-        # Refractory chain R_1 .. R_m (R_m primed), eqs. (15d)-(15e)
-        for i in range(m):
-            idx = self._R_start + i
-            inflow = host_rate(i) * host_pop(i)
-            if i < m - 1:
-                outflow = host_rate(i + 1) * R_[i]
+        # RNA and protein (no diffusion), eq. (22)
+        form += ddt(self._M) - (
+            c['alpha_m'] * H - c['delta_m'] * m_rna
+        ) * v[self._M] * dx
+        form += ddt(self._P) - (
+            c['alpha_p'] * m_rna - c['delta_p'] * p_prot
+        ) * v[self._P] * dx
+
+        # New infections (and induced lysogens) enter latent stage 1
+        entry = beta_V * U
+        if L is not None:
+            entry = entry + c['gamma'] * L
+
+        # Switching stages T_1 .. T_{n_R}, eq. (26)
+        for k in range(n_R):
+            idx = self._T_start + k
+            src = entry if k == 0 else w * T_[k - 1]
+            form += ddt(idx) - (
+                src - (w + sigma[k]) * T_[k]
+            ) * v[idx] * dx
+
+        # Frozen stages n_R + 1 .. n, eq. (27): status set on entry
+        for k in range(n_R, n):
+            i = k - n_R
+            if k == n_R:
+                into = entry if n_R == 0 else w * T_[n_R - 1]
+                src_I, src_J = (1.0 - phi) * into, phi * into
             else:
-                outflow = reversion
-            form += ddt(idx) - (
-                inflow - outflow - beta_V * R_[i]
-            ) * v[idx] * dx
+                src_I, src_J = w * I_[i - 1], w * J_[i - 1]
+            for comp, src, idx in (
+                (I_[i], src_I, self._I_start + i),
+                (J_[i], src_J, self._J_start + i),
+            ):
+                form += ddt(idx) - (
+                    src - (w + sigma[k]) * comp
+                ) * v[idx] * dx
 
-        # Race, eqs. (21)-(22): latent aging (k) races host maturation (j)
-        for k in range(n):
-            for j in range(m):
-                idx = self._I_index(k, j)
-                if k == 0:
-                    src = beta_V * host_pop(j)
-                    if L is not None and j == 0:
-                        src += c['nu'] * L
-                else:
-                    src = w * I_[k - 1][j]
-                if j > 0:
-                    src += host_rate(j - 1) * I_[k][j - 1]
-                out = (w + ell[k] + host_rate(j)) * I_[k][j]
-                form += ddt(idx) - (src - out) * v[idx] * dx
-
-        # Abortive lineage I^(m)_k: adsorption onto R_m, or maturation
-        # that completes during the latent period
-        for k in range(n):
-            idx = self._J_start + k
-            src = beta_V * R_[-1] if k == 0 else w * J_[k - 1]
-            src += host_rate(m - 1) * I_[k][m - 1]
-            form += ddt(idx) - (
-                src - (w + ell[k]) * J_[k]
-            ) * v[idx] * dx
-
-        # Lysogens L, eq. (42)
+        # Lysogens L, eq. (68)
         if L is not None:
             l_idx = self._L_index
             form += ddt(l_idx) - (
-                sum(ell[k] * (sum(I_[k]) + J_[k]) for k in range(n))
-                - c['nu'] * L
+                sum(sigma[k] * stage_total(k) for k in range(n))
+                - c['gamma'] * L
             ) * v[l_idx] * dx
 
         return form
 
     @classmethod
     def from_params(cls, params):
+        n_R = params.get('n_R')
         return cls(
             n_stages=int(params['n_stages']),
-            n_priming=int(params.get('n_priming') or 3),
+            n_R=None if n_R is None else int(n_R),
+            phi_max=float(_param(params, ['phi_max'], 1.0)),
+            K_p=float(_param(params, ['K_p'], 1.0)),
             k_abi=params.get('k_abi'),
         )
+
+    @classmethod
+    def describe_theory(cls, params):
+        s = host_response.summary(params)
+        n_R = params.get('n_R')
+        lines = [
+            "Host response (RNA-protein, § 3.2): "
+            f"p_inf = {s['p_inf']:.4g}, phi_inf = {s['phi_inf']:.3f}, "
+            f"t_1/2 = {s['t_half']:.3g}, t* = {s['t_star']:.3g} "
+            f"(f_c = {s['f_c']:.3f}), t_rev = {s['t_rev']:.3g}",
+            f"Ceiling (§ 3.6): b_eff_inf = {s['b_eff_inf']:.3f} -> "
+            + ("stall possible" if s['stall_possible']
+               else "no stall possible (ceiling slow wave)"),
+            "Conversion window: n_R = "
+            + (f"{n_R}" if n_R is not None else f"n = {params['n_stages']}"),
+        ]
+        return lines
 
     @classmethod
     def extinction_from_scales(cls, params, scales):
@@ -1215,32 +1254,49 @@ class ImmuneSignalingModel(BaseModel):
             return 1, p_end, scales.L_primed_crit / scales.c_eff
         return 0, p_end, float('nan')
 
+    # -- outputs -------------------------------------------------------------
+
     def profile_groups(self):
+        n, n_R = self.n_stages, self.n_R
+        infected = tuple(range(self._T_start, self._J_start + n - n_R))
         groups = [
-            ProfileGroup('S', (2,), r'$S$ (susceptible)', 'orange'),
+            # S and R are derived from U and phi(p) (derived_profiles)
+            ProfileGroup('S', (), r'$S = (1-\phi)U$ (naive)', 'orange'),
+            ProfileGroup('R', (), r'$R = \phi U$ (resistant)', 'red'),
             ProfileGroup('V', (0,), r'$V$ (phage)', 'purple', is_phage=True),
             ProfileGroup('F', (1,), r'$F$ (signal)', 'green'),
-            ProfileGroup(
-                'R', tuple(range(self._R_start, self._I_start)),
-                r'$\sum_j R_j$ (refractory)', 'red',
-            ),
-            ProfileGroup(
-                'I', tuple(range(self._I_start, self._J_start)),
-                r'$\sum_{k,j<m} I^{(j)}_k$ (infected)', 'teal',
-            ),
-            ProfileGroup(
-                'J',
-                tuple(range(self._J_start, self._J_start + self.n_stages)),
-                r'$\sum_k I^{(m)}_k$ (abortive infected)', 'gray',
-            ),
+            ProfileGroup('I', infected, r'$\sum_k$ infected', 'teal'),
+            ProfileGroup('J', (), r'resistant infected', 'gray'),
         ]
         if self.has_lysogens:
             groups.append(
                 ProfileGroup('L', (self._L_index,), r'$L$ (lysogens)', 'brown')
             )
-        # Cached only (not drawn): fully primed cells R_m (primed edge)
-        groups.append(ProfileGroup('R_m', (self._I_start - 1,)))
+        # Cached only (not drawn): RNA, protein, switching and frozen
+        # resistant infected, and the resistant share phi(p)
+        groups += [
+            ProfileGroup('m', (self._M,)),
+            ProfileGroup('p', (self._P,)),
+            ProfileGroup('phi', ()),
+        ]
+        if n_R > 0:
+            groups.append(
+                ProfileGroup('T', tuple(range(self._T_start, self._I_start)))
+            )
+        if n_R < n:
+            frozen = tuple(range(self._J_start, self._J_start + n - n_R))
+            groups.append(ProfileGroup('J_frozen', frozen))
         return groups
+
+    def derived_profiles(self, snapshot):
+        phi = self.resistant_share(snapshot['p'])
+        U = snapshot['U']
+        return {
+            'phi': phi,
+            'S': (1.0 - phi) * U,
+            'R': phi * U,
+            'J': snapshot.get('J_frozen', 0.0) + phi * snapshot.get('T', 0.0),
+        }
 
     def speed_panel_series(self):
         return [SeriesSpec(
@@ -1253,7 +1309,7 @@ class ImmuneSignalingModel(BaseModel):
         edge = result.series.get('primed_edge_x', [])
         if len(edge) > 0:
             overlays.append(Overlay(
-                'line', r'Primed edge ($R_m \geq S_0/2$)',
+                'line', r'Primed edge ($\phi U \geq S_0/2$)',
                 t=result.series['t'], x=edge,
                 style=dict(color='black', linestyle='--'),
             ))
@@ -1275,10 +1331,13 @@ class ImmuneSignalingEvasionModel(ImmuneSignalingModel):
                    with tau(F) = n / w(F) and b_max = b_val
                    (maturation trade-off, eq. 33)
 
-    The abortive lineage keeps the host-capped burst b_R. Defaults
-    (tau_slow = tau, b_slow = b, F_p = K) reduce the model to the
-    non-adaptive ImmuneSignalingModel. F_p is the ``sigma_p`` parameter
-    (alias ``F_p``) and h_p is ``hill_p`` (alias ``h_p``).
+    Resistant lysis keeps the host-capped burst b_R. Deferral stretches
+    every latent stage, including the switchable stages k <= n_R, so in
+    signalled cells it also lengthens the conversion window (§ 4.5,
+    § 5.5). Defaults (tau_slow = tau, b_slow = b, F_p = K) reduce the
+    model to the non-adaptive ImmuneSignalingModel. F_p is the
+    ``sigma_p`` parameter (alias ``F_p``) and h_p is ``hill_p`` (alias
+    ``h_p``).
     """
 
     name = 'immune_signaling_evasion'
@@ -1327,48 +1386,60 @@ class ImmuneSignalingEvasionModel(ImmuneSignalingModel):
 
     @classmethod
     def describe_theory(cls, params):
-        return ["(Naive leading-edge speed c0; the signal is not modelled.)"]
+        return super().describe_theory(params) + [
+            "(Naive leading-edge speed c0; the signal is not modelled.)"
+        ]
 
 
 class ImmuneSignalingLysogenyEvasionModel(ImmuneSignalingModel):
     """Signal model where a temperate phage reads F to lysogenize.
 
-    Manuscript § 6.1 (eqs. 42-43). The latent rate w stays fixed; a
-    per-stage lysogeny hazard
+    First review (revision of Oct 24 2026), § 6.1, eqs. 68-70. The latent
+    rate w stays fixed; a per-stage lysogeny hazard
 
-        ell_k(F) = chi_k * [ell_lo + (ell_hi - ell_lo) * H_p(F)]
+        sigma_k(F) = chi_k [sigma_lo + (sigma_hi - sigma_lo) H_p(F)]
 
-    diverts infected cells (every host stage) into lysogens L, which
-    adsorb phage at beta_L and induce into I^(0)_1 (the productive
-    program) at rate nu. ell_lo / ell_hi are set from lysogeny
-    probabilities p_lys / p_lys_hi over the decision window chi
-    (lys_window_start .. lys_window_end). Defaults p_lys_hi = p_lys
-    (non-sensing temperate phage), F_p = K.
+    diverts infected cells of every latent stage (switching T_k and
+    frozen I_k + J_k alike) into lysogens L. Lysogens adsorb phage at
+    beta_L (phage lost), do not switch, and induce at rate gamma into
+    latent stage 1, where they take the bin's resistant share phi(p) at
+    induction: they join T_1 when n_R >= 1, or split (1 - phi) : phi into
+    I_1 / J_1 when n_R = 0. sigma_lo / sigma_hi are set from lysogeny
+    probabilities ell = p_lys / ell_hi = p_lys_hi over the decision window
+    chi (lys_window_start .. lys_window_end). Defaults p_lys_hi = p_lys
+    (non-sensing temperate phage), F_p = K. Aliases: gamma = nu_induction,
+    ell = p_lys, ell_hi = p_lys_hi.
     """
 
     name = 'immune_signaling_lysogeny_evasion'
     aliases = ()
     has_lysogens = True
     implied_by = ()
+    param_aliases = {
+        **ImmuneSignalingModel.param_aliases,
+        'gamma': 'nu_induction', 'ell': 'p_lys', 'ell_hi': 'p_lys_hi',
+    }
 
     def _extra_constants(self, const, params, base):
         chi = _lysogeny_window(params, self.n_stages)
         n_window = int(sum(chi))
-        p_lo = _param(params, ['p_lys'], 0.0)
-        p_hi = _param(params, ['p_lys_hi'], p_lo)
+        ell_lo = _param(params, ['p_lys', 'ell'], 0.0)
+        ell_hi = _param(params, ['p_lys_hi', 'ell_hi'], ell_lo)
         self._chi = chi
         return {
-            'nu': const(_param(params, ['nu_induction', 'nu'], 0.02)),
-            'ell_lo': const(lysogeny_hazard(p_lo, base['w'], n_window)),
-            'ell_hi': const(lysogeny_hazard(p_hi, base['w'], n_window)),
+            'gamma': const(_param(
+                params, ['nu_induction', 'nu', 'gamma'], 0.02
+            )),
+            'sigma_lo': const(lysogeny_hazard(ell_lo, base['w'], n_window)),
+            'sigma_hi': const(lysogeny_hazard(ell_hi, base['w'], n_window)),
             'F_p': const(_param(params, ['sigma_p', 'F_p'], base['K'])),
             'h_p': const(_param(params, ['hill_p', 'h_p'], base['h'])),
         }
 
     def _lysogeny_hazards(self, F, c):
         H_p = _hill(F, c['F_p'], c['h_p'])
-        ell = c['ell_lo'] + (c['ell_hi'] - c['ell_lo']) * H_p
-        return [chi_k * ell for chi_k in self._chi]
+        sigma = c['sigma_lo'] + (c['sigma_hi'] - c['sigma_lo']) * H_p
+        return [chi_k * sigma for chi_k in self._chi]
 
     @classmethod
     def dispersion_args(cls, params):
@@ -1381,9 +1452,10 @@ class ImmuneSignalingLysogenyEvasionModel(ImmuneSignalingModel):
 
     @classmethod
     def describe_theory(cls, params):
-        return [
+        return super().describe_theory(params) + [
             _describe_lysogeny(params),
-            "(Naive leading-edge speed c0; the signal is not modelled.)"]
+            "(Naive leading-edge speed c0; the signal is not modelled.)",
+        ]
 
 
 # Every model the CLI, sweeps and history loader can construct

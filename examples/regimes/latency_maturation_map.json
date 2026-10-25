@@ -1,0 +1,49 @@
+{
+  "description": "Latency x host-response timescale (n = 4, n_R = n), set B' signal and host response. The response_timescale tau_R divides alpha_m, delta_m, alpha_p, delta_p, so the priming curve stretches (t_1/2 = 0.41 tau_R, t* = 1.81 tau_R) at fixed ceiling phi_inf = 0.952. Fronts outrun their warning when t* exceeds the lead time T(c) = Lambda_eff / (lambda_s c) - tau (1 - n_R / n) (eq. 43); long latency slows the front, which can either let the bin convert infected cells (\u00a7 3.7) or silence the signal (c < c_sil = 0.224, \u00a7 3.3). Theory-based layout, not yet confirmed by runs of the revised model. RNA-protein host response of the first review's revision of Oct 24 2026 (eq. 22); uses the density cutoff (no infection below V_ext = p_ext, removal at rate 5).",
+  "expected": {
+    "slow response (tau_R >~ 4), short latency": "wave_fast: front outruns its warning",
+    "intermediate (tau_R ~ 1, tau ~ 0.5)": "stop_and_go (set B')",
+    "long latency": "stall by conversion during latency (\u00a7 3.7) or a steady silent front (c ~ c_sil); this map tests which",
+    "earlier runs": "with the Erlang priming chain (SISV8/9), long latency silenced the signal and gave steady fronts"
+  },
+  "sweep": {
+    "tau": {
+      "start": 0.1,
+      "end": 4.0,
+      "scale": "log",
+      "num": 8
+    },
+    "response_timescale": {
+      "start": 0.1,
+      "end": 30.0,
+      "scale": "log",
+      "num": 8
+    }
+  },
+  "constants": {
+    "model": "immune_signaling",
+    "n_stages": 4,
+    "b": 5,
+    "M": 40,
+    "K": 1,
+    "h": 20,
+    "alpha_m": 4,
+    "delta_m": 2,
+    "alpha_p": 4,
+    "delta_p": 0.4,
+    "phi_max": 1,
+    "K_p": 1,
+    "D_s": 40,
+    "delta_F": 0.5,
+    "b_R": 0.5,
+    "p_ext": 0.0001,
+    "cutoff": true,
+    "cutoff_rate": 5.0,
+    "L": 250,
+    "t_end": 300,
+    "dt": 0.02,
+    "dx": 0.1,
+    "history_every": 50
+  },
+  "adaptive": false
+}
