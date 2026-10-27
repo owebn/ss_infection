@@ -4,15 +4,20 @@ import math
 import numpy as np
 
 from . import extinction, host_response
-from .dispersion import dispersion_args, solve_dispersion_erlang
+from .dispersion import (
+    dispersion_args,
+    solve_dispersion_erlang,
+    solve_dispersion_fixed_delay,
+)
 from .host_response import HostResponse
 from .initial_conditions import (
     AbiBolusInitialCondition,
     AbiHeterogeneousInitialCondition,
     BolusInitialCondition,
     ImmuneSignalingInitialCondition,
+    ImmuneSignalingSwitchingInitialCondition,
 )
-from .metrics import FrontTracker, SignalFrontTracker
+from .metrics import BarrierTracker, FrontTracker, SignalFrontTracker
 from .outputs import Overlay, ProfileGroup, SeriesSpec
 from .regimes import REGIME_COLUMNS
 
@@ -258,6 +263,14 @@ class BaseModel(abc.ABC):
                 groups[group.name] = tuple(group.indices)
         return groups
 
+    def update_time(self, t):
+        """Called before each time step with the new time t (default:
+        nothing). Models with time-dependent switches override it."""
+
+    def after_step(self, u):
+        """Called after each converged step with the solution u (default:
+        nothing). Models with history-dependent sources override it."""
+
     def derived_profiles(self, snapshot):
         """Profiles computed from cached ones ({name: array}).
 
@@ -301,7 +314,8 @@ class DelayChainModel(BaseModel):
         dS/dt = -beta V S
         dI_1/dt = beta V S - w I_1,  dI_k/dt = w (I_{k-1} - I_k)
 
-    (Shielding adsorption onto infected cells uses beta here.)
+    Shielding adsorption onto infected cells uses beta_I (``f_I_val``,
+    default beta).
 
     Component layout: 0: V, 1: S, 2 .. 2+n-1: I_1 .. I_n
     """
@@ -323,12 +337,14 @@ class DelayChainModel(BaseModel):
         beta_val = params.get(
             'f_B_val', params.get('f_B', params.get('beta', 1.0))
         )
+        beta_I_val = _param(params, ['f_I_val', 'f_I', 'beta_I'], beta_val)
         w_val = params.get('w_val', 2.0)
         b_val = params.get('b_val', params.get('b', 5.0))
         dt_val = params.get('dt', 0.1)
 
         D_c = fem.Constant(domain, default_scalar_type(D_val))
         beta_c = fem.Constant(domain, default_scalar_type(beta_val))
+        beta_I_c = fem.Constant(domain, default_scalar_type(beta_I_val))
         w_c = fem.Constant(domain, default_scalar_type(w_val))
         burst_c = fem.Constant(domain, default_scalar_type(b_val))
         dt_c = fem.Constant(domain, default_scalar_type(dt_val))
@@ -354,7 +370,7 @@ class DelayChainModel(BaseModel):
             ) * dx
             - (
                 -beta_c * V_ads * S
-                - beta_c * V_ads * sum(I_)
+                - beta_I_c * V_ads * sum(I_)
                 + burst_c * w_c * I_[-1]
             ) * v_V * dx
         )
@@ -393,6 +409,134 @@ class DelayChainModel(BaseModel):
                 'I', tuple(range(2, 2 + self.n_stages)),
                 r'$I = \sum I_k$', 'teal',
             ),
+            # Cached only: last latent stage, lysis flux = w * lysing
+            ProfileGroup('lysing', (1 + self.n_stages,)),
+        ]
+
+
+class FixedDelayModel(BaseModel):
+    """Phage infection with a true fixed latent period tau (§ 1.4).
+
+    Every infection bursts exactly tau after it starts, the n -> infinity
+    limit of the Erlang chain at fixed mean:
+
+        dV/dt = D V'' - beta V S - beta_I V I + b G(t),
+        dS/dt = -beta V S,   dI/dt = beta V S - G(t),
+        G(t) = beta V S evaluated at t - tau (the lysis flux).
+
+    G is read from a buffer of past infection fluxes (nodal values of
+    beta V S, with the cutoff applied), so the delay is exact in time
+    steps: tau is rounded to N = round(tau / dt) steps. Cost is that of
+    n = 1, whatever tau / dt.
+
+    Component layout: 0: V, 1: S, 2: I (all latent infected)
+    """
+
+    name = 'delay_fixed'
+    aliases = ('fixed_delay',)
+    initial_condition = BolusInitialCondition
+
+    def __init__(self, n_stages: int = 1):
+        self.n_stages = n_stages
+
+    @property
+    def num_components(self) -> int:
+        return 3
+
+    @classmethod
+    def theoretical_speed(cls, params):
+        args = dispersion_args(params)
+        return solve_dispersion_fixed_delay(
+            float(params['tau']), args['D'], args['k'], args['b'],
+            f_abi=args['f_abi'],
+        )
+
+    def create_weak_formulation(self, domain, W, u, u_n, params):
+        D_val = _param(params, ['D_val', 'D'], 1.0)
+        beta_val = _param(params, ['f_B_val', 'f_B', 'beta'], 1.0)
+        beta_I_val = _param(params, ['f_I_val', 'f_I', 'beta_I'], beta_val)
+        b_val = _param(params, ['b_val', 'b'], 5.0)
+        dt_val = float(_param(params, ['dt'], 0.1))
+        tau = float(params['tau'])
+
+        def const(val):
+            return fem.Constant(domain, default_scalar_type(val))
+
+        D_c, beta_c = const(D_val), const(beta_val)
+        beta_I_c = const(beta_I_val)
+        b_c, dt_c = const(b_val), const(dt_val)
+
+        # Lysis flux G on the collapsed V space; S values aligned to it
+        V0, map0 = W.sub(0).collapse()
+        V1, map1 = W.sub(1).collapse()
+        x0 = V0.tabulate_dof_coordinates()[:, 0]
+        x1 = V1.tabulate_dof_coordinates()[:, 0]
+        order1 = np.argsort(x1)[np.argsort(np.argsort(x0))]
+        self._map_V = np.asarray(map0)
+        self._map_S = np.asarray(map1)[order1]
+        self._beta = float(beta_val)
+        self._V_ext = None
+        if _param(params, ['cutoff'], False):
+            self._V_ext = float(_param(params, ['p_ext', 'V_ext'], 1e-6))
+        self._N = max(1, int(round(tau / dt_val)))
+        # Fluxes of solved steps only (the t = 0 state never entered I)
+        self._G = fem.Function(V0)
+        self._buffer = []
+
+        v = ufl.TestFunctions(W)
+        uc = ufl.split(u)
+        unc = ufl.split(u_n)
+        dx = ufl.dx
+        V, S, I_tot = uc
+        V_n, S_n, I_n = unc
+        V_ads, removal = self._phage_cutoff(V, params, domain)
+        G = self._G
+
+        eq_V = (
+            ((V - V_n) / dt_c) * v[0] * dx
+            + D_c * ufl.inner(ufl.grad(V), ufl.grad(v[0])) * dx
+            - (
+                -beta_c * V_ads * S - beta_I_c * V_ads * I_tot + b_c * G
+            ) * v[0] * dx
+        )
+        if removal is not None:
+            eq_V += removal * v[0] * dx
+        eq_S = ((S - S_n) / dt_c) * v[1] * dx \
+            - (-beta_c * V_ads * S) * v[1] * dx
+        eq_I = ((I_tot - I_n) / dt_c) * v[2] * dx \
+            - (beta_c * V_ads * S - G) * v[2] * dx
+        return eq_V + eq_S + eq_I
+
+    def after_step(self, u):
+        """Store this step's infection flux; G = the flux N steps ago."""
+        V = u.x.array[self._map_V]
+        S = u.x.array[self._map_S]
+        if self._V_ext is not None:
+            V = np.where(V >= self._V_ext, V, 0.0)
+        self._buffer.append(self._beta * V * S)
+        if len(self._buffer) > self._N:
+            self._buffer.pop(0)
+        if len(self._buffer) == self._N:
+            self._G.x.array[:] = self._buffer[0]
+        else:
+            self._G.x.array[:] = 0.0
+
+    @classmethod
+    def from_params(cls, params):
+        return cls(n_stages=int(params.get('n_stages') or 1))
+
+    @classmethod
+    def describe_theory(cls, params):
+        dt = float(params['dt'])
+        N = max(1, int(round(float(params['tau']) / dt)))
+        return [f"Fixed delay: tau = {params['tau']} -> {N} steps "
+                f"(effective tau = {N * dt:.4g})"]
+
+    def profile_groups(self):
+        return [
+            ProfileGroup('S', (1,), r'$S$ (susceptible)', 'orange'),
+            ProfileGroup('V', (0,), r'$V$ (phage)', 'purple', is_phage=True),
+            ProfileGroup('I', (2,), r'$I$ (latent)', 'teal'),
         ]
 
 
@@ -402,7 +546,14 @@ class AbortiveInfectionModel(BaseModel):
     A fraction f_abi of the lawn starts in the abortive (primed) state,
     written R (the resistant state of the signalling models). They adsorb phage
     at the normal rate beta, and their infections (J_1 .. J_k_abi) die
-    without releasing phage (b_R = 0 here).
+    releasing b_R phage (``b_abi``, default 0: complete abortion). Infected
+    cells shield at beta_I (``f_I_val``, default beta); free phage decay at
+    delta_V (default 0).
+
+    ``barrier_depleting`` false (default true) makes the abortive cells a
+    non-depleting sink (review § 2.4, Table 4): R is not consumed when it
+    adsorbs, so the barrier never thins; its infections still run through
+    J and release b_R.
 
     Component layout in the mixed function space:
         0:  V   (free phage)
@@ -429,6 +580,9 @@ class AbortiveInfectionModel(BaseModel):
         """Track depletion of all uninfected cells, S + R."""
         return [1, 2]
 
+    def get_abortive_subspace(self):
+        return 2
+
     def create_weak_formulation(
         self, domain, W, u, u_n, params
     ):
@@ -436,14 +590,21 @@ class AbortiveInfectionModel(BaseModel):
         beta_val = params.get(
             'f_B_val', params.get('f_B', params.get('beta', 1.0))
         )
+        beta_I_val = _param(params, ['f_I_val', 'f_I', 'beta_I'], beta_val)
         w_val = params.get('w_val', 2.0)
         b_val = params.get('b_val', params.get('b', 5.0))
+        b_R_val = _param(params, ['b_abi', 'b_S', 'b_R'], 0.0)
+        delta_V_val = _param(params, ['delta_P', 'delta_V'], 0.0)
         dt_val = params.get('dt', 0.1)
+        depleting = bool(_param(params, ['barrier_depleting'], True))
 
         D_c = fem.Constant(domain, default_scalar_type(D_val))
         beta_c = fem.Constant(domain, default_scalar_type(beta_val))
+        beta_I_c = fem.Constant(domain, default_scalar_type(beta_I_val))
         w_c = fem.Constant(domain, default_scalar_type(w_val))
         burst_c = fem.Constant(domain, default_scalar_type(b_val))
+        burst_R_c = fem.Constant(domain, default_scalar_type(b_R_val))
+        delta_V_c = fem.Constant(domain, default_scalar_type(delta_V_val))
         dt_c = fem.Constant(domain, default_scalar_type(dt_val))
 
         v = ufl.TestFunctions(W)
@@ -481,8 +642,9 @@ class AbortiveInfectionModel(BaseModel):
         # --- Free phage (V) ---
         # Phage diffuses, is consumed by adsorption onto
         # both S and R (at rate beta), is unproductively
-        # adsorbed onto infected cells (at rate beta), and is
-        # produced only by lysis of the productive chain.
+        # adsorbed onto infected cells (at rate beta_I), decays
+        # at delta_V, and is produced by lysis of the productive
+        # chain (b) and the abortive chain (b_R).
         all_infected = list(I_) + list(J_)
         eq_V = (
             ((V - V_n) / dt_c) * v_V * dx
@@ -492,8 +654,10 @@ class AbortiveInfectionModel(BaseModel):
             - (
                 -beta_c * V_ads * S
                 - beta_c * V_ads * R
-                - beta_c * V_ads * sum(all_infected)
+                - beta_I_c * V_ads * sum(all_infected)
                 + burst_c * w_c * I_[-1]
+                + burst_R_c * w_c * J_[-1]
+                - delta_V_c * V
             ) * v_V * dx
         )
 
@@ -506,11 +670,10 @@ class AbortiveInfectionModel(BaseModel):
             - (-beta_c * V_ads * S) * v_S * dx
         )
 
-        # --- Abortive cells (R) ---
-        eq_R = (
-            ((R - R_n) / dt_c) * v_R * dx
-            - (-beta_c * V_ads * R) * v_R * dx
-        )
+        # --- Abortive cells (R); not consumed for a non-depleting sink ---
+        eq_R = ((R - R_n) / dt_c) * v_R * dx
+        if depleting:
+            eq_R -= (-beta_c * V_ads * R) * v_R * dx
 
         # --- Productive infected chain (I_1 .. I_n) ---
         eq_I_list = []
@@ -562,10 +725,20 @@ class AbortiveInfectionModel(BaseModel):
         return cls(n_stages=int(params['n_stages']), k_abi=params['k_abi'])
 
     @classmethod
+    def dispersion_args(cls, params):
+        """Leaky abortion (b_R > 0) enters as b_eff = b (1 - f_abi)
+        + b_R f_abi (eq. 9), exact when k_abi = n (same latency)."""
+        args = dispersion_args(params)
+        b_R = float(_param(params, ['b_abi', 'b_S', 'b_R'], 0.0))
+        if b_R and args['b'] > 0:
+            args['f_abi'] *= (args['b'] - b_R) / args['b']
+        return args
+
+    @classmethod
     def describe_theory(cls, params):
         return [
             f"Abi parameters: f_abi={params.get('f_abi')}, "
-            f"k_abi={params.get('k_abi')}"
+            f"k_abi={params.get('k_abi')}, b_R={params.get('b_abi') or 0}"
         ]
 
     def profile_groups(self):
@@ -591,25 +764,32 @@ class AbiHeterogeneousModel(AbortiveInfectionModel):
 
     Inherits the exact PDE weak formulation and component layout from
     AbortiveInfectionModel. Spatial heterogeneity is defined via initial
-    bacterial lawn distributions.
+    bacterial lawn distributions: naive lawn on [0, L_naive], the patch
+    (abortive fraction f_abi) of length L_primed, then optionally
+    ``L_after`` of naive lawn again (default 0, patch to the domain end).
+    With f_abi = 1 and L_after > 0 the patch is a barrier of length L
+    (review § 2.4); BarrierTracker then reports the entrance density,
+    the phage reaching it, the depth eaten and the breach time.
     """
 
     name = 'abi_heterogeneous'
     initial_condition = AbiHeterogeneousInitialCondition
+    trackers = (BarrierTracker,)
     param_aliases = {
         **AbortiveInfectionModel.param_aliases,
         'l_naive': 'L_naive', 'l_primed': 'L_primed',
+        'L_barrier': 'L_primed', 'run_up': 'L_naive',
     }
     sweep_defaults = {
         **AbortiveInfectionModel.sweep_defaults,
-        'L_naive': 50.0, 'L_primed': 50.0,
+        'L_naive': 50.0, 'L_primed': 50.0, 'L_after': 0.0,
     }
-    implied_by = ('L_naive', 'L_primed')
+    implied_by = ('L_naive', 'L_primed', 'L_after')
 
     @classmethod
     def prepare_params(cls, params):
         super().prepare_params(params)
-        params['L'] = float(params['L_naive']) + float(params['L_primed'])
+        params['L'] = sum(cls._patch_lengths(params)) + cls._after(params)
 
     @staticmethod
     def _patch_lengths(params):
@@ -618,6 +798,10 @@ class AbiHeterogeneousModel(AbortiveInfectionModel):
             float(params.get('L_primed', params.get('l_primed', 50.0))),
         )
 
+    @staticmethod
+    def _after(params):
+        return float(_param(params, ['L_after'], 0.0))
+
     @classmethod
     def adaptive_overrides(cls, params):
         """Domain spans both patches; t_end covers crossing both."""
@@ -625,7 +809,7 @@ class AbiHeterogeneousModel(AbortiveInfectionModel):
         f_B = params.get('f_B_val', 1.0)
         B0 = params.get('B0_val', 1.0)
         L_naive, L_primed = cls._patch_lengths(params)
-        L = L_naive + L_primed
+        L = L_naive + L_primed + cls._after(params)
 
         c_naive_est, _ = cls.theoretical_speed({**params, 'f_abi': 0.0})
         c_naive_est = max(0.1, c_naive_est)
@@ -1081,6 +1265,17 @@ class ImmuneSignalingModel(BaseModel):
         c = {key: const(val) for key, val in base.items()}
         c.update(self._extra_constants(const, params, base))
 
+        # Optional delayed signalling: no signal is released before
+        # signal_on_time (e.g. to establish a fast front first)
+        self._t_on = _param(params, ['signal_on_time'], None)
+        signal_yield = c['M']
+        if self._t_on is not None and float(self._t_on) > 0:
+            self._t_on = float(self._t_on)
+            self._signal_switch = const(0.0)
+            signal_yield = c['M'] * self._signal_switch
+        else:
+            self._t_on = None
+
         v = ufl.TestFunctions(W)
         uc = ufl.split(u)
         unc = ufl.split(u_n)
@@ -1143,7 +1338,7 @@ class ImmuneSignalingModel(BaseModel):
         form += (
             ddt(1)
             + c['D_s'] * ufl.inner(ufl.grad(F), ufl.grad(v[1])) * dx
-            - (c['M'] * (lysis_prod + lysis_res) - c['delta_F'] * F)
+            - (signal_yield * (lysis_prod + lysis_res) - c['delta_F'] * F)
             * v[1] * dx
         )
 
@@ -1196,6 +1391,10 @@ class ImmuneSignalingModel(BaseModel):
             ) * v[l_idx] * dx
 
         return form
+
+    def update_time(self, t):
+        if getattr(self, '_t_on', None) is not None:
+            self._signal_switch.value = 1.0 if t >= self._t_on else 0.0
 
     @classmethod
     def from_params(cls, params):
@@ -1274,10 +1473,16 @@ class ImmuneSignalingModel(BaseModel):
             )
         # Cached only (not drawn): RNA, protein, switching and frozen
         # resistant infected, and the resistant share phi(p)
+        if n_R == n:
+            lysing = (self._T_start + n_R - 1,)
+        else:
+            lysing = (self._I_start + n - n_R - 1, self._J_start + n - n_R - 1)
         groups += [
             ProfileGroup('m', (self._M,)),
             ProfileGroup('p', (self._P,)),
             ProfileGroup('phi', ()),
+            # Last latent stage: lysis flux = w * lysing (for f_Y)
+            ProfileGroup('lysing', lysing),
         ]
         if n_R > 0:
             groups.append(
@@ -1458,13 +1663,190 @@ class ImmuneSignalingLysogenyEvasionModel(ImmuneSignalingModel):
         ]
 
 
+class ImmuneSignalingSwitchingModel(ImmuneSignalingModel):
+    """Signalling model with a finite switching rate kappa (open problem 7).
+
+    Replaces the fast-switching shortcut of ImmuneSignalingModel by
+    explicit naive S and resistant R compartments. Each bin converts at a
+    finite rate toward the resistant share phi(p):
+
+        S -> R at kappa phi(p),   R -> S at kappa (1 - phi(p)),
+
+    so R / (S + R) relaxes to phi(p) on a time 1 / kappa. Infections of S
+    enter the productive chain I_1, infections of R the resistant chain
+    J_1; stages k <= n_R switch I_k <-> J_k at the same rates, stages
+    k > n_R are frozen. I_n lyses with b, J_n with b_R; both release M
+    signal units. kappa -> infinity recovers ImmuneSignalingModel with the
+    same n_R. No lysogeny, phage strategies or delayed signal switch.
+
+    Component layout in the mixed function space:
+        0: V   1: F   2: S   3: R   4: m (RNA)   5: p (protein)
+        6 .. 6 + n - 1:       I_1 .. I_n (productive)
+        6 + n .. 6 + 2n - 1:  J_1 .. J_n (resistant)
+    """
+
+    name = 'immune_signaling_switching'
+    initial_condition = ImmuneSignalingSwitchingInitialCondition
+    param_aliases = {
+        **ImmuneSignalingModel.param_aliases,
+        'kappa': 'kappa_switch',
+    }
+    sweep_defaults = {
+        **ImmuneSignalingModel.sweep_defaults, 'kappa_switch': 1.0,
+    }
+    implied_by = ('kappa_switch',)
+
+    _S, _R, _M, _P = 2, 3, 4, 5
+
+    @property
+    def _I_start(self):
+        return 6
+
+    @property
+    def _J_start(self):
+        return 6 + self.n_stages
+
+    @property
+    def num_components(self) -> int:
+        return 6 + 2 * self.n_stages
+
+    def get_front_subspaces(self):
+        return [self._S, self._R]
+
+    def get_resistant_subspace(self):
+        return self._R
+
+    def create_weak_formulation(self, domain, W, u, u_n, params):
+        n, n_R = self.n_stages, self.n_R
+        base = self._rates(params)
+        base['kappa'] = float(_param(params, ['kappa_switch', 'kappa'], 1.0))
+
+        def const(val):
+            return fem.Constant(domain, default_scalar_type(val))
+
+        c = {key: const(val) for key, val in base.items()}
+        self._t_on = None
+
+        v = ufl.TestFunctions(W)
+        uc = ufl.split(u)
+        unc = ufl.split(u_n)
+        dx = ufl.dx
+        dt = c['dt']
+
+        def ddt(i):
+            return ((uc[i] - unc[i]) / dt) * v[i] * dx
+
+        V, F = uc[0], uc[1]
+        S, R = uc[self._S], uc[self._R]
+        m_rna, p_prot = uc[self._M], uc[self._P]
+        V_ads, removal = self._phage_cutoff(V, params, domain)
+        I_ = [uc[self._I_start + k] for k in range(n)]
+        J_ = [uc[self._J_start + k] for k in range(n)]
+
+        H = _hill(F, c['K'], c['h'])
+        w = self._latency_rate(F, c)
+        b = self._burst(F, c)
+        p_pos = ufl.max_value(p_prot, 0.0)
+        phi = c['phi_max'] * p_pos / (c['K_p'] + p_pos)
+
+        def switch(naive, resistant):
+            """Net naive -> resistant conversion flux."""
+            return c['kappa'] * (phi * naive - (1.0 - phi) * resistant)
+
+        lysis_prod = w * I_[-1]
+        lysis_res = w * J_[-1]
+        beta_V = c['beta'] * V_ads
+
+        rhs_V = (
+            -beta_V * (S + R)
+            - c['beta_I'] * V_ads * (sum(I_) + sum(J_))
+            + b * lysis_prod + c['b_R'] * lysis_res
+            - c['delta_V'] * V
+        )
+        if removal is not None:
+            rhs_V -= removal
+        form = (
+            ddt(0)
+            + c['D'] * ufl.inner(ufl.grad(V), ufl.grad(v[0])) * dx
+            - rhs_V * v[0] * dx
+        )
+        form += (
+            ddt(1)
+            + c['D_s'] * ufl.inner(ufl.grad(F), ufl.grad(v[1])) * dx
+            - (c['M'] * (lysis_prod + lysis_res) - c['delta_F'] * F)
+            * v[1] * dx
+        )
+
+        # Uninfected naive S and resistant R
+        form += ddt(self._S) - (
+            -beta_V * S - switch(S, R)
+        ) * v[self._S] * dx
+        form += ddt(self._R) - (
+            -beta_V * R + switch(S, R)
+        ) * v[self._R] * dx
+
+        # RNA and protein, eq. (22)
+        form += ddt(self._M) - (
+            c['alpha_m'] * H - c['delta_m'] * m_rna
+        ) * v[self._M] * dx
+        form += ddt(self._P) - (
+            c['alpha_p'] * m_rna - c['delta_p'] * p_prot
+        ) * v[self._P] * dx
+
+        # Infected chains; stages k <= n_R switch at kappa
+        for k in range(n):
+            src_I = beta_V * S if k == 0 else w * I_[k - 1]
+            src_J = beta_V * R if k == 0 else w * J_[k - 1]
+            conv = switch(I_[k], J_[k]) if k < n_R else 0.0
+            i_idx, j_idx = self._I_start + k, self._J_start + k
+            form += ddt(i_idx) - (
+                src_I - w * I_[k] - conv
+            ) * v[i_idx] * dx
+            form += ddt(j_idx) - (
+                src_J - w * J_[k] + conv
+            ) * v[j_idx] * dx
+
+        return form
+
+    @classmethod
+    def describe_theory(cls, params):
+        kappa = float(_param(params, ['kappa_switch', 'kappa'], 1.0))
+        return super().describe_theory(params) + [
+            f"Finite switching: kappa = {kappa} (relaxation time "
+            f"{1.0 / kappa:.3g})"
+        ]
+
+    def profile_groups(self):
+        n = self.n_stages
+        I_idx = tuple(range(self._I_start, self._I_start + n))
+        J_idx = tuple(range(self._J_start, self._J_start + n))
+        return [
+            ProfileGroup('S', (self._S,), r'$S$ (naive)', 'orange'),
+            ProfileGroup('R', (self._R,), r'$R$ (resistant)', 'red'),
+            ProfileGroup('V', (0,), r'$V$ (phage)', 'purple', is_phage=True),
+            ProfileGroup('F', (1,), r'$F$ (signal)', 'green'),
+            ProfileGroup('I', I_idx + J_idx, r'$\sum_k$ infected', 'teal'),
+            ProfileGroup('J', J_idx, r'resistant infected', 'gray'),
+            ProfileGroup('m', (self._M,)),
+            ProfileGroup('p', (self._P,)),
+            # phi(p) is the target share; R / (S + R) lags it by ~1/kappa
+            ProfileGroup('phi', ()),
+            ProfileGroup('lysing', (I_idx[-1], J_idx[-1])),
+        ]
+
+    def derived_profiles(self, snapshot):
+        return {'phi': self.resistant_share(snapshot['p'])}
+
+
 # Every model the CLI, sweeps and history loader can construct
 MODEL_CLASSES = (
     DelayChainModel,
+    FixedDelayModel,
     AbortiveInfectionModel,
     AbiHeterogeneousModel,
     LysogenyDelayChainModel,
     ImmuneSignalingModel,
     ImmuneSignalingEvasionModel,
     ImmuneSignalingLysogenyEvasionModel,
+    ImmuneSignalingSwitchingModel,
 )

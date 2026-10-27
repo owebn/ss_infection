@@ -3,6 +3,12 @@ import abc
 import numpy as np
 
 
+def bolus_amplitude(params):
+    """Peak of the initial phage bolus A exp(-x^2 / 2) (default 5)."""
+    val = params.get('bolus_amplitude')
+    return 5.0 if val is None else float(val)
+
+
 class BaseInitialCondition(abc.ABC):
     """Abstract base class for applying initial conditions."""
 
@@ -19,7 +25,7 @@ class BolusInitialCondition(BaseInitialCondition):
         S0 = params.get('B0_val', 1.0)
 
         def initial_V(x):
-            return 5.0 * np.exp(-x[0]**2 / 2.0)
+            return bolus_amplitude(params) * np.exp(-x[0]**2 / 2.0)
 
         def initial_S(x):
             return np.full(x.shape[1], S0)
@@ -51,7 +57,7 @@ class AbiBolusInitialCondition(BaseInitialCondition):
         )
 
         def initial_V(x):
-            return 5.0 * np.exp(-x[0]**2 / 2.0)
+            return bolus_amplitude(params) * np.exp(-x[0]**2 / 2.0)
 
         def initial_S(x):
             return np.full(x.shape[1], (1.0 - f_abi) * S0)
@@ -71,7 +77,8 @@ class AbiHeterogeneousInitialCondition(BaseInitialCondition):
     """IC for the spatially heterogeneous abortive infection model.
 
     Domain consists of a naive non-abortive region (0 <= x <= L_naive)
-    followed by a patch with f_abi abortive cells (L_naive < x <= L_total).
+    followed by a patch with f_abi abortive cells of length L_primed,
+    then naive lawn again for the last L_after (default 0).
 
     Component layout expected:
         0: V, 1: S, 2: R, 3+: infected stages
@@ -87,23 +94,20 @@ class AbiHeterogeneousInitialCondition(BaseInitialCondition):
         L_naive = float(
             params.get('L_naive', params.get('l_naive', 50.0))
         )
+        L_after = float(params.get('L_after') or 0.0)
+        patch_end = float(params['L']) - L_after if L_after > 0 else np.inf
+
+        def in_patch(x):
+            return (x[0] > L_naive) & (x[0] <= patch_end)
 
         def initial_V(x):
-            return 5.0 * np.exp(-x[0]**2 / 2.0)
+            return bolus_amplitude(params) * np.exp(-x[0]**2 / 2.0)
 
         def initial_S(x):
-            res = np.empty(x.shape[1])
-            is_naive = x[0] <= L_naive
-            res[is_naive] = S0
-            res[~is_naive] = (1.0 - f_abi) * S0
-            return res
+            return np.where(in_patch(x), (1.0 - f_abi) * S0, S0)
 
         def initial_R(x):
-            res = np.empty(x.shape[1])
-            is_naive = x[0] <= L_naive
-            res[is_naive] = 0.0
-            res[~is_naive] = f_abi * S0
-            return res
+            return np.where(in_patch(x), f_abi * S0, 0.0)
 
         u.sub(0).interpolate(initial_V)
         u.sub(1).interpolate(initial_S)
@@ -118,17 +122,21 @@ class ImmuneSignalingInitialCondition(BaseInitialCondition):
 
     Initialises the uninfected lawn U = S0 across the domain, V as a
     Gaussian bolus, and the signal, RNA, protein and infected components
-    to 0 (no prior priming).
+    to 0. Optional pre-primed patch: ``primed_patch_p`` = p0 sets the
+    protein to p0 on [``primed_patch_start``, ``primed_patch_end``]
+    (RNA stays 0, so the patch decays at delta_p without signal).
 
     Component layout expected:
         0: V, 1: F, 2: U, 3: m (RNA), 4: p (protein), 5+: infected stages
     """
 
+    protein_index = 4
+
     def apply(self, W, u, params):
         S0 = params.get('B0_val', params.get('B0', 1.0))
 
         def initial_V(x):
-            return 5.0 * np.exp(-x[0]**2 / 2.0)
+            return bolus_amplitude(params) * np.exp(-x[0]**2 / 2.0)
 
         def initial_S(x):
             return np.full(x.shape[1], S0)
@@ -136,5 +144,30 @@ class ImmuneSignalingInitialCondition(BaseInitialCondition):
         u.sub(0).interpolate(initial_V)
         u.sub(2).interpolate(initial_S)
 
+        # Optional pre-primed patch: protein p = p0 on [start, end]
+        p0 = params.get('primed_patch_p')
+        if p0 is not None and float(p0) > 0:
+            x0 = float(params.get('primed_patch_start') or 0.0)
+            x1 = float(params.get('primed_patch_end') or 0.0)
+
+            def initial_p(x):
+                inside = (x[0] >= x0) & (x[0] <= x1)
+                return np.where(inside, float(p0), 0.0)
+
+            u.sub(self.protein_index).interpolate(initial_p)
+
         # Sync ghost values for parallel MPI execution
         u.x.scatter_forward()
+
+
+class ImmuneSignalingSwitchingInitialCondition(
+    ImmuneSignalingInitialCondition
+):
+    """IC for the finite-switching signalling model: the lawn starts
+    naive (S = S0, R = 0), protein at component 5.
+
+    Component layout expected:
+        0: V, 1: F, 2: S, 3: R, 4: m, 5: p, 6+: infected stages
+    """
+
+    protein_index = 5

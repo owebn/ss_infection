@@ -166,6 +166,88 @@ def solve_dispersion_fixed_delay(
     return c_star, lambda_star
 
 
+def solve_dispersion_discrete(
+    n, D, k, w, b, dt, dx=0.0, f_abi=0.0, hazards=None,
+    lambda_max=5.0, grid_size=2000, tau_fixed=None,
+):
+    """Selected speed of the discretized scheme (backward Euler in time,
+    P1 finite elements in space) for the Erlang chain.
+
+    For a mode e^{-lambda x} growing by g = e^{s dt} per step, backward
+    Euler turns every d/dt into sigma = (1 - e^{-s dt}) / dt, and the
+    P1 mass and stiffness matrices replace lambda^2 by
+    lambda_h^2 = 6 (cosh(lambda dx) - 1) / (dx^2 (2 + cosh(lambda dx))).
+    So sigma solves the continuous relation (solve_dispersion_erlang) at
+    lambda_h, and the scheme's speed is min_lambda s / lambda with
+    s = -ln(1 - sigma dt) / dt. Backward Euler runs fast by about
+    s dt / 2 (3% at dt = 0.02 for the base case).
+
+    With ``tau_fixed`` (models.FixedDelayModel) the latency is an exact
+    delay of tau_fixed: sigma = D lambda_h^2 - k + k b e^{-s tau_fixed},
+    solved for s directly (n, w, hazards ignored).
+
+    Returns:
+        tuple: (c_star, lambda_star) of the scheme
+    """
+    effective_b = (1.0 - f_abi) * b
+    if tau_fixed is not None:
+        return _discrete_fixed_delay(
+            D, k, effective_b, dt, dx, tau_fixed, lambda_max, grid_size
+        )
+    hazards = np.zeros(n) if hazards is None else np.asarray(hazards, float)
+    if effective_b * np.prod(w / (w + hazards)) <= 1.0:
+        return 0.0, 0.0
+    lambdas = np.linspace(1e-3, lambda_max, grid_size)
+    lam2 = _lambda_h2(lambdas, dx)
+    sigma = k * (effective_b - 1.0)
+    speeds = np.full_like(lambdas, np.inf)
+    for i, l2 in enumerate(lam2):
+        for _ in range(100):
+            stage = sigma + w + hazards
+            prod = np.prod(stage)
+            edge = sigma - D * l2 + k
+            F = edge * prod - effective_b * k * w**n
+            dF = prod * (1.0 + edge * np.sum(1.0 / stage))
+            step = F / dF
+            sigma -= step
+            if abs(step) < 1e-13:
+                break
+        if sigma * dt < 1.0:
+            s = -np.log1p(-sigma * dt) / dt if dt > 0 else sigma
+            speeds[i] = s / lambdas[i]
+    i = int(np.argmin(speeds))
+    return float(speeds[i]), float(lambdas[i])
+
+
+def _lambda_h2(lambdas, dx):
+    """P1 symbol of -d^2/dx^2 over the mass matrix (lambda^2 if dx = 0)."""
+    if dx <= 0:
+        return lambdas**2
+    ch = np.cosh(lambdas * dx)
+    return 6.0 * (ch - 1.0) / (dx**2 * (2.0 + ch))
+
+
+def _discrete_fixed_delay(D, k, b, dt, dx, tau, lambda_max, grid_size):
+    if b <= 1.0:
+        return 0.0, 0.0
+    lambdas = np.linspace(1e-3, lambda_max, grid_size)
+    speeds = np.full_like(lambdas, np.inf)
+    s = k * (b - 1.0)
+    for i, l2 in enumerate(_lambda_h2(lambdas, dx)):
+        for _ in range(100):
+            sig = (1.0 - np.exp(-s * dt)) / dt if dt > 0 else s
+            dsig = np.exp(-s * dt) if dt > 0 else 1.0
+            F = sig - D * l2 + k - k * b * np.exp(-s * tau)
+            dF = dsig + k * b * tau * np.exp(-s * tau)
+            step = F / dF
+            s -= step
+            if abs(step) < 1e-13:
+                break
+        speeds[i] = s / lambdas[i]
+    i = int(np.argmin(speeds))
+    return float(speeds[i]), float(lambdas[i])
+
+
 def dispersion_args(params):
     """Parse the solve_dispersion_erlang inputs shared by every model.
 

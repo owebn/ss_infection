@@ -170,6 +170,16 @@ def parse_arguments():
         help="Length of primed abortive patch",
     )
     parser.add_argument(
+        "--L_after", type=float, default=0.0,
+        help="Naive lawn after the primed patch (barrier of length "
+             "L_primed when > 0)",
+    )
+    parser.add_argument(
+        "--barrier_depleting", type=int, default=None,
+        help="0: abortive cells are a non-depleting sink (not consumed "
+             "on adsorption); default 1 (true abortion)",
+    )
+    parser.add_argument(
         "--p_ext", "--P_extinction", "--V_ext", type=float, default=1e-6,
         help="Phage extinction/breakthrough density threshold V_ext",
     )
@@ -243,6 +253,23 @@ def parse_arguments():
         "--n_R", type=int, default=None,
         help="Last latent stage whose cells can still switch "
              "(0 = status fixed at infection; default n_stages)",
+    )
+    parser.add_argument(
+        "--signal_on_time", type=float, default=None,
+        help="Release no signal before this time (e.g. let a fast front "
+             "establish in a naive lawn first)",
+    )
+    parser.add_argument(
+        "--primed_patch_p", type=float, default=None,
+        help="Initial protein p0 in a pre-primed patch",
+    )
+    parser.add_argument(
+        "--primed_patch_start", type=float, default=None,
+        help="Start of the pre-primed patch",
+    )
+    parser.add_argument(
+        "--primed_patch_end", type=float, default=None,
+        help="End of the pre-primed patch",
     )
     parser.add_argument(
         "--b_abi", "--b_S", "--b_R", type=float, default=0.0,
@@ -320,6 +347,27 @@ def parse_arguments():
     )
 
     # Simulation parameters
+    parser.add_argument(
+        "--rescale_time", type=float, default=None,
+        help="Time t0 at which free phage V is multiplied by "
+             "--rescale_factor (once)",
+    )
+    parser.add_argument(
+        "--rescale_factor", type=float, default=None,
+        help="Factor A applied to V at --rescale_time",
+    )
+    parser.add_argument(
+        "--rescale_infected", type=int, default=None,
+        help="1: --rescale_factor also scales the infected cells",
+    )
+    parser.add_argument(
+        "--kappa_switch", "--kappa", type=float, default=None,
+        help="Finite switching rate (immune_signaling_switching)",
+    )
+    parser.add_argument(
+        "--bolus_amplitude", type=float, default=5.0,
+        help="Peak A of the initial phage bolus A exp(-x^2/2)",
+    )
     parser.add_argument(
         "--dt", type=float, default=0.1,
         help="Time step size",

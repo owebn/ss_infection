@@ -73,13 +73,15 @@ same command is also available as `ss-infection`.
 
 | `--model` | Description | Manuscript |
 |---|---|---|
-| `delay_chain` | Phage V, susceptible cells S, latent chain I₁…Iₙ (rate w = n/τ, burst b) | §1.1 |
-| `abi` | Lawn with a fraction `f_abi` of abortive cells R (burst 0) | §2.1 |
-| `abi_heterogeneous` | Naive region of length `L_naive` followed by an abortive patch of length `L_primed` | §2.4 |
+| `delay_chain` | Phage V, susceptible cells S, latent chain I₁…Iₙ (rate w = n/τ, burst b); infected cells shield at β_I | §1.1 |
+| `delay_fixed` | As `delay_chain` with an exact latent period τ (the n → ∞ limit at fixed mean): each infection bursts τ later, read from a buffer of past infection fluxes (τ rounded to whole steps) | §1.4 |
+| `abi` | Lawn with a fraction `f_abi` of abortive cells R (burst b_R, default 0); optional phage decay δ_V; `barrier_depleting = 0` makes R a non-depleting sink (not consumed on adsorption) | §2.1 |
+| `abi_heterogeneous` | Naive region of length `L_naive` followed by an abortive patch of length `L_primed`, then `L_after` of naive lawn (default 0). With `f_abi = 1` and `L_after > 0` the patch is a barrier of length L | §2.4 |
 | `lysogeny_delay_chain` | Temperate phage: constant lysogeny probability `p_lys` over a decision window; lysogens L induce at rate ν | §6.1 (no signal) |
 | `immune_signaling` | Death signal F (yield M, diffusion D_s, decay δ_F) drives a non-diffusing RNA–protein response, ṁ = α_m H(F) − δ_m m, ṗ = α_p m − δ_p p; cells switch fast and reversibly to resistance with share φ(p) = φ_max p/(K_p + p). Uninfected cells and latent stages k ≤ n_R switch; later stages freeze. Reversion is intrinsic (protein decay) | §§3.1–3.7 |
 | `immune_signaling_evasion` | As above; phage switch latency (`--tau_slow`) and burst (`--b_slow` or `--burst_mode frontier`) when F exceeds the trigger F_p | §4.5 |
 | `immune_signaling_lysogeny_evasion` | As above; phage switch lysogeny probability from ℓ (`p_lys`) to ℓ_hi (`p_lys_hi`) when F exceeds F_p. Lysogens don't switch; an induced lysogen takes the local φ(p) | §6 |
+| `immune_signaling_switching` | `immune_signaling` with a finite switching rate κ (`kappa_switch`): explicit naive S and resistant R, S → R at κφ(p), R → S at κ(1 − φ(p)); latent stages k ≤ n_R switch I_k ↔ J_k at the same rates. κ → ∞ recovers `immune_signaling` | §9, open problem 7 |
 
 Strategy parameters default to the non-sensing values (`tau_slow = tau`,
 `b_slow = b`, `p_lys_hi = p_lys`, `F_p = K`), so an unset run is the
@@ -104,6 +106,8 @@ manuscript-notation aliases accepted on the command line, in sweep JSON and in
 | ℓ, ℓ_hi, γ | `p_lys`, `p_lys_hi`, `nu_induction` | `ell`, `ell_hi`, `gamma` |
 | F_p, h_p | `sigma_p`, `hill_p` | `F_p`, `h_p` |
 | δ_V, V_ext | `delta_P`, `p_ext` | `delta_V`, `V_ext` |
+| barrier L, run-up | `L_primed`, `L_naive` | `L_barrier`, `run_up` |
+| κ | `kappa_switch` | `kappa` |
 
 \* sweep JSON and Python only (no one-letter command-line flag). `alpha` is
 reserved as an older alias of `f_abi`. Host-response defaults are set A′
@@ -129,7 +133,8 @@ functions in `ss_infection.plotting` take that object.
 ### Sweeps (`--sweep config.json -o results.csv`)
 
 A sweep JSON has `sweep` (ranges with `start`, `end` and `num` or `step`;
-`"scale": "log"` optional), `constants`, and `adaptive` (domain size and
+`"scale": "log"` optional; or an explicit list `{"values": [4, 6, 8]}`),
+`constants`, and `adaptive` (domain size and
 resolution chosen from a Fisher–KPP estimate). See `examples/`. Each run's
 history goes to `results_histories/run_XXXXX.npz`, linked from the CSV's
 `history_file` column (disable with `--no_histories`).
@@ -139,8 +144,15 @@ CSV columns depend on the model:
 * every run: `c_star`, `extinction`, `p_end`, `t_extinction`
 * PDE runs: regime metrics `regime`, `c_ref`, `c_mean`, `c_cv`, `X_max`,
   `t_arrest`, `n_stalls`, `T_cycle`, `L_step`, `hit_domain_end`
-* signal models: `L_halo_max/final`, `primed_band_width_max/final`,
+* signal models: `L_halo_max/final` (tip to the R = φU ≥ S₀/2 edge),
+  `L_halo_mid_max/final` (the review's halo: U = ½ front to φ = ½),
+  `primed_band_width_max/final`,
   `sigma_tip_final` (edge signal F_f), `z_K_final`, `warning_median`
+* `abi_heterogeneous`: barrier metrics `V_in_max` (entrance density),
+  `N_reach_final` (cumulative net phage flux into the barrier),
+  `X_eat_final` (depth with R < f_abi S₀/2), `t_breach` (first time the tip
+  passes the far side; needs `L_after > 0`), with per-step series `V_in`,
+  `N_reach`, `X_eat` in the history file
 
 ### Regime sweeps (`examples/regimes/`)
 
@@ -175,6 +187,27 @@ infection edge: a stall is a stretch where the tip speed stays below
 `stall_frac × c_ref` (default 0.25) for at least `stall_min`. All thresholds
 can be set with `--regime_transient`, `--regime_window`, `--stall_frac`,
 `--stall_min`, `--cv_steady` and `--halo_tol`. See `regimes.py`.
+
+### Starting conditions and switches
+
+* `bolus_amplitude` (default 5): peak of the initial phage bolus A·exp(−x²/2)
+  (all models).
+* `rescale_time`, `rescale_factor` (all models): multiply free phage V by A
+  once at t₀. `rescale_infected = 1` also scales the infected cells (the
+  whole linear tip state), which gives the clean lag ln(1/A)/λ*; V alone
+  gives a smaller lag, because infections already committed at the tip
+  still burst at full size.
+
+Signal models only:
+
+* `signal_on_time`: no signal is released before this time, e.g. to let a
+  fast front establish in a naive lawn before signalling starts.
+* `primed_patch_p`, `primed_patch_start`, `primed_patch_end`: a pre-primed
+  patch with protein p = p₀ on [start, end] at t = 0.
+
+History files of signal models and `delay_chain` also cache `lysing` (the
+last latent stage; the lysis flux is w × lysing); signal models also cache
+the derived profiles `S`, `R`, `phi`.
 
 ### Density cutoff
 
@@ -229,9 +262,10 @@ flake8
   stop-and-go patterns should still be checked against a tenfold change in
   V_ext (manuscript §3.11) before being called physical.
 * Time stepping is first-order implicit Euler: `dt = 0.05` overestimates front
-  speeds by about 7% (n = 1, w = 2); use `dt ≤ 0.02` for quantitative work.
+  speeds by about 7% (n = 1, w = 2); use `dt ≤ 0.02` for quantitative work
+  (+3% at 0.02, +0.7% at 0.005). `dispersion.solve_dispersion_discrete(n, D,
+  k, w, b, dt, dx)` gives the scheme's own selected speed for comparison.
 * Runs stop early when the 50% front reaches 80% of the domain.
-* The initial phage bolus is fixed at 5·exp(−x²/2).
 * `--theoretical` and theoretical sweeps for `delay_chain` apply the default
   `f_abi = 0.5`, which lowers the reported speed; pass `--f_abi 0` for a naive
   lawn.

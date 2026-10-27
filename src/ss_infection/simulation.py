@@ -169,8 +169,15 @@ def run_simulation(
     """Executes time-stepping loop and computes wavespeed and extinction.
 
     Uses model.get_front_subspaces() to sum bacterial densities for
-    wavefront detection. Fronts, phage totals and tracker series are
-    recorded every step; the profiles in model.history_groups() every
+    wavefront detection. Optional ``rescale_time`` t0 and
+    ``rescale_factor`` A multiply the free phage V by A everywhere once,
+    at the first step with t >= t0 (review § 2.3: the tip equations are
+    linear, so the front should lag by ln(1/A)/lambda* at unchanged speed).
+    ``rescale_infected`` true also scales the infected cells (profile
+    group 'I'), i.e. the whole linear tip state; with V alone the
+    committed infections still burst at full size and the lag is smaller.
+    Fronts, phage totals and tracker series are recorded every step; the
+    profiles in model.history_groups() every
     ``params['history_every']`` steps. If ``history_path`` is given, they
     are cached there (see ``history.py``).
 
@@ -207,6 +214,12 @@ def run_simulation(
         )
     )
     history_every = max(1, int(params.get('history_every') or 10))
+    rescale_t = params.get('rescale_time')
+    rescale_A = params.get('rescale_factor')
+    rescale_pending = (
+        rescale_t is not None and rescale_A is not None
+        and float(rescale_A) != 1.0
+    )
 
     trackers = [
         tracker(model, params, x_coords, S0) for tracker in model.trackers
@@ -278,8 +291,18 @@ def run_simulation(
         while t < params['t_end']:
             t += params['dt']
             step += 1
+            model.update_time(t)
             solver.solve(u)
+            if rescale_pending and t >= float(rescale_t):
+                scaled = [0]
+                if params.get('rescale_infected'):
+                    scaled += list(groups.get('I', ()))
+                for idx in scaled:
+                    u.x.array[sub_map(idx)[0]] *= float(rescale_A)
+                u.x.scatter_forward()
+                rescale_pending = False
             u_n.x.array[:] = u.x.array
+            model.after_step(u)
 
             # Track distal free phage at x = L_total and total phage
             record_step(t)

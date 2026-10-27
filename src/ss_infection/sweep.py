@@ -55,6 +55,8 @@ def generate_parameter_range(spec):
     Supports linear and logarithmic scaling.
 
     Options in spec:
+        - values (list): Explicit values, used as given (overrides the
+          range options below), e.g. {"values": [4, 6, 8, 12, 16, 24]}.
         - start (float): Starting value.
         - end (float): Ending value.
         - scale (str): 'linear' (default) or 'log' / 'log10'.
@@ -63,6 +65,9 @@ def generate_parameter_range(spec):
           log10 units for log scale).
         - num / num_points (int): Number of points to generate.
     """
+    if 'values' in spec:
+        return [float(v) for v in spec['values']]
+
     start = float(spec['start'])
     end = float(spec['end'])
     scale = str(spec.get('scale', 'linear')).lower()

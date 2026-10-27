@@ -2,7 +2,8 @@
 
 FrontTracker (every model) records the leading infection edge. Its
 subclass SignalFrontTracker (immune signaling models, manuscript
-§§ 3.2-3.4) adds the primed band, halo and signal metrics.
+§§ 3.2-3.4) adds the primed band, halo and signal metrics, and
+BarrierTracker (abi_heterogeneous, review § 2.4) the barrier metrics.
 
 Tracker interface (any class a model lists in ``trackers``):
     __init__(model, params, x_coords, S0)
@@ -18,6 +19,8 @@ Per time step (arrays aligned with the history's ``t``; NaN = undefined):
     primed_edge_x       leading primed edge, farthest x where the resistant
                         uninfected density R = phi(p) U >= S0 / 2
     primed_band_width   total length where R >= S0 / 2
+    L_halo_mid          review's halo (§ 3.5): from the U = S0/2 front to
+                        the leading point where phi(p) = 1/2, clipped at 0
     L_halo              primed_edge_x - tip_x, clipped at 0 (0 when no
                         primed band; primed cells only behind the tip
                         give no halo)
@@ -32,6 +35,17 @@ Per node (arrays aligned with ``x``):
     warning_x           warning time T(x) = t_tip_x - t_signal_x
                         (negative when the signal arrives after infection)
 
+Barrier (BarrierTracker; barrier = patch on [x_b, x_e], x_b = L_naive,
+x_e = x_b + L_primed):
+    V_in                phage density at the barrier entrance V(x_b)
+    N_reach             cumulative net phage flux into the barrier,
+                        integral of -D dV/dx at x_b over time
+    X_eat               depth eaten, from x_b to the farthest barrier point
+                        where the abortive cells R < f_abi S0 / 2 (0 for a
+                        non-depleting sink)
+    t_breach (summary)  first time the tip passes x_e (needs L_after > 0;
+                        NaN if never)
+
 All edges are linearly interpolated between nodes.
 """
 
@@ -42,7 +56,7 @@ PRIMED_LEVEL = 0.5
 
 # Per-run summaries, in CSV column order (see factory.output_columns)
 SUMMARY_COLUMNS = (
-    'L_halo_max', 'L_halo_final',
+    'L_halo_max', 'L_halo_final', 'L_halo_mid_max', 'L_halo_mid_final',
     'primed_band_width_max', 'primed_band_width_final',
     'sigma_tip_final', 'z_K_final', 'warning_median',
 )
@@ -101,6 +115,78 @@ class FrontTracker:
         return {}
 
 
+class BarrierTracker(FrontTracker):
+    """Tip plus barrier entrance density, phage budget and eaten depth.
+
+    Needs the model to provide get_abortive_subspace().
+    """
+
+    SUMMARY_COLUMNS = (
+        'V_in_max', 'N_reach_final', 'X_eat_final', 't_breach',
+    )
+
+    SERIES = ('tip_x', 'V_in', 'N_reach', 'X_eat')
+
+    def __init__(self, model, params, x_coords, S0):
+        super().__init__(model, params, x_coords, S0)
+        self.D = float(params.get('D_val') or 1.0)
+        self.f_abi = float(params.get('f_abi') or 0.0)
+        self.x_b = float(params['L_naive'])
+        self.x_e = self.x_b + float(params['L_primed'])
+        self.has_after = float(params.get('L_after') or 0.0) > 0
+        self.abortive_sub = (model.get_abortive_subspace(),)
+        # Node interval holding the entrance, for the flux
+        self.i_b = int(np.clip(
+            np.searchsorted(self.x, self.x_b, side='right') - 1,
+            0, len(self.x) - 2,
+        ))
+        self.in_barrier = (self.x > self.x_b) & (self.x <= self.x_e)
+        self.t_prev = None
+        self.flux_prev = 0.0
+        self.N = 0.0
+        self.t_breach = np.nan
+
+    def update(self, t, field):
+        super().update(t, field)
+        V = field((0,))
+        i = self.i_b
+        flux = -self.D * (V[i + 1] - V[i]) / (self.x[i + 1] - self.x[i])
+        if self.t_prev is not None:
+            # Trapezoidal rule in time
+            self.N += 0.5 * (flux + self.flux_prev) * (t - self.t_prev)
+        self.t_prev, self.flux_prev = t, flux
+
+        X_eat = np.nan
+        if self.f_abi > 0:
+            R = field(self.abortive_sub)[self.in_barrier]
+            edge = leading_edge(
+                self.x[self.in_barrier], -R, -0.5 * self.f_abi * self.S0
+            )
+            X_eat = 0.0 if np.isnan(edge) else max(edge - self.x_b, 0.0)
+
+        tip = self.series['tip_x'][-1]
+        if self.has_after and np.isnan(self.t_breach) and tip > self.x_e:
+            self.t_breach = t
+
+        self.series['V_in'].append(float(np.interp(self.x_b, self.x, V)))
+        self.series['N_reach'].append(self.N)
+        self.series['X_eat'].append(X_eat)
+
+    def summary(self):
+        def last(name):
+            vals = np.asarray(self.series[name], dtype=float)
+            vals = vals[~np.isnan(vals)]
+            return float(vals[-1]) if len(vals) else np.nan
+
+        V_in = np.asarray(self.series['V_in'], dtype=float)
+        return {
+            'V_in_max': float(np.nanmax(V_in)) if len(V_in) else np.nan,
+            'N_reach_final': last('N_reach'),
+            'X_eat_final': last('X_eat'),
+            't_breach': self.t_breach,
+        }
+
+
 class SignalFrontTracker(FrontTracker):
     """Tracks tip, primed band and signal metrics every time step.
 
@@ -114,7 +200,7 @@ class SignalFrontTracker(FrontTracker):
 
     SERIES = (
         'tip_x', 'primed_edge_x', 'primed_band_width', 'L_halo',
-        'sigma_tip', 'x_K', 'z_K',
+        'L_halo_mid', 'sigma_tip', 'x_K', 'z_K',
     )
 
     def __init__(self, model, params, x_coords, S0):
@@ -122,6 +208,9 @@ class SignalFrontTracker(FrontTracker):
         self.K = float(model.signal_threshold(params))
         self.protein_sub = (model.get_protein_subspace(),)
         self.resistant_share = model.resistant_share
+        # Models with an explicit resistant compartment (finite switching)
+        get_R = getattr(model, 'get_resistant_subspace', None)
+        self.resistant_sub = (get_R(),) if get_R is not None else None
         self.signal_sub = (model.get_signal_subspace(),)
         self.primed_edge_snap = []
         self.t_signal_x = np.full(len(self.x), np.nan)
@@ -131,17 +220,32 @@ class SignalFrontTracker(FrontTracker):
         return leading_edge(self.x, R, PRIMED_LEVEL * self.S0)
 
     def resistant_density(self, field):
-        """R = phi(p) U: resistant uninfected cells."""
+        """(U, R, phi): uninfected, resistant uninfected R = phi(p) U and
+        the resistant share phi(p). With an explicit R compartment, R is
+        read directly and phi is the actual share R / U."""
         U = field(self.front_subs)
-        return U, self.resistant_share(field(self.protein_sub)) * U
+        if self.resistant_sub is not None:
+            R = field(self.resistant_sub)
+            share = np.divide(R, U, out=np.zeros_like(R), where=U > 1e-12)
+            return U, R, share
+        phi = self.resistant_share(field(self.protein_sub))
+        return U, phi * U, phi
 
     def update(self, t, field):
-        U, R = self.resistant_density(field)
-        self._update(t, U, R, field(self.signal_sub))
+        U, R, phi = self.resistant_density(field)
+        self._update(t, U, R, field(self.signal_sub), phi)
 
-    def _update(self, t, U, R, F):
+    def _update(self, t, U, R, F, phi):
         x = self.x
         tip = self.tip(U)
+        mid = leading_edge(x, -U, -0.5 * self.S0)
+        phi_edge = leading_edge(x, phi, 0.5)
+        if np.isnan(mid):
+            halo_mid = np.nan
+        elif np.isnan(phi_edge):
+            halo_mid = 0.0
+        else:
+            halo_mid = max(phi_edge - mid, 0.0)
         primed_mask = R >= PRIMED_LEVEL * self.S0
         edge = self.primed_edge(R)
         x_K = leading_edge(x, F, self.K)
@@ -160,6 +264,7 @@ class SignalFrontTracker(FrontTracker):
                 np.trapezoid(primed_mask.astype(float), x)
             ),
             'L_halo': halo,
+            'L_halo_mid': halo_mid,
             'sigma_tip': (
                 float(np.interp(tip, x, F)) if not np.isnan(tip)
                 else np.nan
@@ -213,6 +318,8 @@ class SignalFrontTracker(FrontTracker):
         summary = {
             'L_halo_max': peak('L_halo'),
             'L_halo_final': last('L_halo'),
+            'L_halo_mid_max': peak('L_halo_mid'),
+            'L_halo_mid_final': last('L_halo_mid'),
             'primed_band_width_max': peak('primed_band_width'),
             'primed_band_width_final': last('primed_band_width'),
             'sigma_tip_final': last('sigma_tip'),
